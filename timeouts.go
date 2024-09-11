@@ -14,7 +14,7 @@ type Timeouts struct {
 	// The TTL duration is being randomized by `Randomizer`.
 	// TTL value should be at least twice bigger than `ReloadInterval` for optimal
 	// cache self-maintenance.
-	TTL time.Duration `mapstructure:"ttl"`
+	TTL time.Duration
 
 	// TTL for entry which was not found in data storage (e.g. SQL database) or
 	// should act like not found.
@@ -22,7 +22,7 @@ type Timeouts struct {
 	// this `NotFoundTTL` is used instead of `TTL` attribute.
 	// The duration is being randomized by `Randomizer`.
 	// If set to 0, not-found entries are not stored in cache.
-	NotFoundTTL time.Duration `mapstructure:"cache_ttl_not_found"`
+	NotFoundTTL time.Duration
 
 	// TTL for entry which first time load failed with an error (except NotFound).
 	// Does not apply for reloads.

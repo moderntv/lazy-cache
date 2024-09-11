@@ -14,18 +14,25 @@ import (
 	metrics_pkg "github.com/moderntv/lazy-cache/internal/metrics"
 )
 
+const (
+	tllWatcherInterval                      = 100 * time.Millisecond
+	reloadWatcherInterval                   = 100 * time.Millisecond
+	automaticReloadIntervalFraction float64 = 0.9 // if automatic reload is enabled, the next reload is performed at 90% time of data expiration
+	minAutomaticReloadDuration              = 100 * time.Millisecond
+)
+
 type Cache[K comparable, T any] struct {
 	// static attributes (does not change its value after initialization)
-	ctx              context.Context
-	log              zerolog.Logger
-	metrics          *metrics_pkg.Metrics
-	name             string
-	timeouts         Timeouts
-	loadOneFunc      LoadOneFunc[K, T]
-	loadMultipleFunc LoadMultipleFunc[K, T]
-	automaticReload  AutomaticReload
-	ttlWatcher       *deathrow.Prison[K]
-	reloadWatcher    *deathrow.Prison[K]
+	ctx                 context.Context
+	log                 zerolog.Logger
+	metrics             *metrics_pkg.Metrics
+	name                string
+	timeouts            Timeouts
+	loadOneFunc         LoadOneFunc[K, T]
+	loadMultipleFunc    LoadMultipleFunc[K, T]
+	automaticReloadType AutomaticReload
+	ttlWatcher          *deathrow.Prison[K]
+	reloadWatcher       *deathrow.Prison[K]
 	// dynamic attributes (not using mutex)
 	memSizeValue atomic.Uint64
 	// attributes protected by mutex
@@ -47,22 +54,20 @@ func NewCache[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err err
 		}
 	}
 
-	// TODO: params.MemorySize
-
 	log := params.Log.With().Str("cache", params.Name).Logger()
 
 	c = &Cache[K, T]{
-		ctx:              params.Context,
-		log:              log,
-		metrics:          metrics,
-		name:             params.Name,
-		timeouts:         params.Timeouts,
-		loadOneFunc:      params.LoadOneFunc,
-		loadMultipleFunc: params.LoadMultipleFunc,
-		automaticReload:  params.AutomaticReload,
-		ttlWatcher:       deathrow.NewPrison[K](),
-		reloadWatcher:    deathrow.NewPrison[K](),
-		data:             make(map[K]*cachedEntry[T]),
+		ctx:                 params.Context,
+		log:                 log,
+		metrics:             metrics,
+		name:                params.Name,
+		timeouts:            params.Timeouts,
+		loadOneFunc:         params.LoadOneFunc,
+		loadMultipleFunc:    params.LoadMultipleFunc,
+		automaticReloadType: params.AutomaticReload,
+		ttlWatcher:          deathrow.NewPrison[K](),
+		reloadWatcher:       deathrow.NewPrison[K](),
+		data:                make(map[K]*cachedEntry[T]),
 	}
 
 	if params.PreloadChan != nil {
@@ -73,8 +78,21 @@ func NewCache[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err err
 
 	go c.startTTLWatcher()
 
-	if c.automaticReload != AutomaticReloadDisabled {
+	if c.automaticReloadType != AutomaticReloadDisabled {
+		realMinReloadInterval := time.Duration(
+			float64(params.Timeouts.ReloadInterval.Milliseconds())*
+				(1-params.Timeouts.Randomizer)*
+				automaticReloadIntervalFraction) *
+			time.Millisecond
+		if realMinReloadInterval < minAutomaticReloadDuration {
+			c.log.Warn().
+				Dur("givenMinInterval", realMinReloadInterval).
+				Dur("defaultMinInterval", minAutomaticReloadDuration).
+				Msg("combination of automatic reload interval is too short, setting to minimum default value")
+		}
+
 		go c.startReloadWatcher()
+
 	} else {
 		c.log.Info().Msg("automatic reload disabled")
 	}
@@ -148,6 +166,15 @@ func (c *Cache[K, T]) Get(ID K) *T {
 
 	entry.mu.Unlock()
 
+	// do not store into cache when TTL is 0
+	if ttl == 0 {
+		c.mu.Lock()
+		delete(c.data, ID)
+		c.mu.Unlock()
+
+		return entry.value.Load()
+	}
+
 	// update watchers
 	c.setEntryWatchers(ID, ttl, entry, nowMillis)
 
@@ -193,7 +220,7 @@ func (c *Cache[K, T]) Invalidate(ID K) {
 
 	entry.nextReload.Store(0)
 
-	if c.automaticReload != AutomaticReloadDisabled {
+	if c.automaticReloadType != AutomaticReloadDisabled {
 		c.reloadWatcher.Push(ID, 0)
 	}
 }
@@ -254,7 +281,7 @@ func (c *Cache[K, T]) addLoadedEntry(loadedEntry LoadedEntry[K, T], nowMillis in
 }
 
 func (c *Cache[K, T]) startTTLWatcher() {
-	ch := c.ttlWatcher.Popper(c.ctx)
+	ch := c.ttlWatcher.PopperWithResolution(c.ctx, tllWatcherInterval)
 
 	// read data from TTL watcher and remove expired entries from cache
 	// channel is closed when context is done
@@ -288,9 +315,9 @@ func (c *Cache[K, T]) startTTLWatcher() {
 }
 
 func (c *Cache[K, T]) startReloadWatcher() {
-	ch := c.reloadWatcher.Popper(c.ctx)
+	ch := c.reloadWatcher.PopperWithResolution(c.ctx, reloadWatcherInterval)
 
-	// read data from TTL watcher and remove expired entries from cache
+	// read data from reload watcher and reload expired entries
 	// channel is closed when context is done
 	for {
 		item, more := <-ch
@@ -310,7 +337,7 @@ func (c *Cache[K, T]) startReloadWatcher() {
 
 		// prevent unnecessary reloads of entries that are not used
 		// if entry is later accessed, it is lazy-reloaded
-		if c.automaticReload == AutomaticReloadAccessedEntries && !entry.accessed.Load() {
+		if c.automaticReloadType == AutomaticReloadAccessedEntries && !entry.accessed.Load() {
 			continue
 		}
 
@@ -348,11 +375,15 @@ func (c *Cache[K, T]) setEntryWatchers(
 		c.ttlWatcher.Push(entryID, ttl)
 	}
 
-	if c.automaticReload == AutomaticReloadDisabled {
+	if c.automaticReloadType == AutomaticReloadDisabled {
 		return
 	}
 
-	c.reloadWatcher.Push(entryID, time.Duration(entry.nextReload.Load()-nowMillis)*time.Millisecond)
+	nextAutomaticReloadDuration := time.Duration(float64(entry.nextReload.Load()-nowMillis)*automaticReloadIntervalFraction) * time.Millisecond
+	if nextAutomaticReloadDuration < minAutomaticReloadDuration {
+		nextAutomaticReloadDuration = minAutomaticReloadDuration
+	}
+	c.reloadWatcher.Push(entryID, nextAutomaticReloadDuration)
 }
 
 func (c *Cache[K, T]) startMemoryMeassurement(interval time.Duration) {
