@@ -14,7 +14,7 @@ type Timeouts struct {
 	// The TTL duration is being randomized by `Randomizer`.
 	// TTL value should be at least twice bigger than `ReloadInterval` for optimal
 	// cache self-maintenance.
-	TTL time.Duration
+	TTL time.Duration `mapstructure:"ttl"`
 
 	// TTL for entry which was not found in data storage (e.g. SQL database) or
 	// should act like not found.
@@ -22,13 +22,13 @@ type Timeouts struct {
 	// this `NotFoundTTL` is used instead of `TTL` attribute.
 	// The duration is being randomized by `Randomizer`.
 	// If set to 0, not-found entries are not stored in cache.
-	NotFoundTTL time.Duration
+	NotFoundTTL time.Duration `mapstructure:"not_found_ttl"`
 
 	// TTL for entry which first time load failed with an error (except NotFound).
 	// Does not apply for reloads.
 	// The duration is being randomized by `Randomizer`.
 	// If set to 0, these entries are not stored in cache.
-	ErrorTTL time.Duration
+	ErrorTTL time.Duration `mapstructure:"error_ttl"`
 
 	// ReloadInterval specifies how often the entry should be reloaded or how long its data
 	// are valid in cache.
@@ -37,20 +37,20 @@ type Timeouts struct {
 	// is triggered only when entry was accessed (via `Get` function) since last reload. If
 	// entry was not accessed, the reload is postponed until `ReloadInterval` duration passes
 	// (if `AutomaticReload` is enabled) or until `Get` function is called on the entry.
-	ReloadInterval time.Duration
+	ReloadInterval time.Duration `mapstructure:"reload_interval"`
 
 	// Randomizer specifies how much the timeouts/durations should be randomized.
 	// value 0 means no randomization, 0.1 means 10% randomization, etc. Any value above 1
 	// is treated as 1.
 	// e.g. real entry TTL duration is set as `TTL` +/- `TTL` * `Randomizer`.
 	// All durations are being randomized each time they are set.
-	Randomizer float64
+	Randomizer float64 `mapstructure:"randomizer"`
 
 	// MemsizeUpdate specifies how often the cache should update its memory size.
 	// Due to the fact that entries in cache can be added, removed or reloaded very often,
 	// the cache memory size is recalculated in specified intervals.
 	// If set to 0, memory size is not updated.
-	MemsizeUpdate time.Duration
+	MemsizeUpdate time.Duration `mapstructure:"memsize_update"`
 }
 
 func (t *Timeouts) check() error {
