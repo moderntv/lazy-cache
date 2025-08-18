@@ -39,7 +39,7 @@ func testCacheParallelism(t *testing.T) {
 
 	loadCounter := atomic.Int64{}
 
-	c, err := NewCache(Params[int, string]{
+	c, err := New(Params[int, string]{
 		Context: context.Background(),
 		Log:     test_utils.Logger(),
 		Name:    "test_cache1",
@@ -133,7 +133,7 @@ func testCacheErrorEntryReload(t *testing.T) {
 
 	increment := 0
 
-	c, err := NewCache(Params[int, int]{
+	c, err := New(Params[int, int]{
 		Context: context.Background(),
 		Log:     test_utils.Logger(),
 		Name:    "test_cache1",
@@ -169,7 +169,7 @@ func testCacheErrorEntryReload(t *testing.T) {
 func testCacheEntriesExpiration(t *testing.T) {
 	t.Parallel()
 
-	c, err := NewCache(Params[int, string]{
+	c, err := New(Params[int, string]{
 		Context: context.Background(),
 		Log:     test_utils.Logger(),
 		Name:    "test_cache1",
@@ -219,7 +219,7 @@ func testCacheEntriesExpiration(t *testing.T) {
 func testCacheEntryTTLProlong(t *testing.T) {
 	t.Parallel()
 
-	c, err := NewCache(Params[int, string]{
+	c, err := New(Params[int, string]{
 		Context: context.Background(),
 		Log:     test_utils.Logger(),
 		Name:    "test_cache1",
@@ -258,7 +258,7 @@ func testCacheEntryAutomaticReloadAll(t *testing.T) {
 
 	loadCounter := 0
 
-	c, err := NewCache(Params[int, string]{
+	c, err := New(Params[int, string]{
 		Context: context.Background(),
 		Log:     test_utils.Logger(),
 		Name:    "test_cache1",
@@ -297,7 +297,7 @@ func testCacheEntryAutomaticReloadAccessed(t *testing.T) {
 
 	loadCounter := 0
 
-	c, err := NewCache(Params[int, string]{
+	c, err := New(Params[int, string]{
 		Context: context.Background(),
 		Log:     test_utils.Logger(),
 		Name:    "test_cache1",

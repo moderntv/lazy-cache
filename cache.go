@@ -40,7 +40,7 @@ type Cache[K comparable, T any] struct {
 	data map[K]*cachedEntry[T]
 }
 
-func NewCache[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
+func New[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
 	err = params.check()
 	if err != nil {
 		return

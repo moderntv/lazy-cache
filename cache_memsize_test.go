@@ -23,7 +23,7 @@ func testCacheMemsizeCalculated(t *testing.T) {
 	timeouts := cacheTestTimeouts
 	timeouts.MemsizeUpdate = 1 * time.Second
 
-	c, err := NewCache(Params[int, entryMemTestGeneric]{
+	c, err := New(Params[int, entryMemTestGeneric]{
 		Context: context.Background(),
 		Log:     test_utils.Logger(),
 		Name:    "test_cache1",
@@ -107,7 +107,7 @@ func testCacheMemsizeManual(t *testing.T) {
 	timeouts := cacheTestTimeouts
 	timeouts.MemsizeUpdate = 1 * time.Second
 
-	c, err := NewCache(Params[int, entryMemTestManual]{
+	c, err := New(Params[int, entryMemTestManual]{
 		Context: context.Background(),
 		Log:     test_utils.Logger(),
 		Name:    "test_cache1",
