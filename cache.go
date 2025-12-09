@@ -239,6 +239,50 @@ func (c *Cache[K, T]) IsCached(ID K) bool {
 	return nowMillis < entry.nextReload.Load()
 }
 
+// ForceSet forcefully sets a value in the cache, overriding any existing entry.
+// This function bypasses the normal load mechanism and should only be used in
+// special cases where you need to directly manipulate cache contents.
+// The value will be cached with the normal TTL and ReloadInterval settings.
+func (c *Cache[K, T]) ForceSet(ID K, value *T) {
+	if c.metrics != nil {
+		c.metrics.ForceSetCount.Inc()
+	}
+
+	nowMillis := time.Now().UnixMilli()
+
+	c.mu.RLock()
+	entry, exists := c.data[ID]
+	c.mu.RUnlock()
+
+	// update existing entry
+	if exists {
+		entry.mu.Lock()
+		ttl := entry.set(value, nil, nowMillis, &c.timeouts, false)
+		entry.mu.Unlock()
+
+		c.setEntryWatchers(ID, ttl, entry, nowMillis)
+
+		return
+	}
+
+	// add new entry
+	entry = &cachedEntry[T]{}
+	entry.mu.Lock()
+
+	c.mu.Lock()
+	c.data[ID] = entry
+	c.mu.Unlock()
+
+	ttl := entry.set(value, nil, nowMillis, &c.timeouts, true)
+	entry.mu.Unlock()
+
+	c.setEntryWatchers(ID, ttl, entry, nowMillis)
+
+	if c.metrics != nil {
+		c.metrics.ItemsCount.Inc()
+	}
+}
+
 func (c *Cache[K, T]) startPreloading(preloadChan <-chan LoadedEntry[K, T]) {
 	// read data from reload channel and store it to cache
 	for {

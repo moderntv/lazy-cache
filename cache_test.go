@@ -33,6 +33,7 @@ func TestCache(t *testing.T) {
 	t.Run("testCacheMemsizeCalculated", testCacheMemsizeCalculated)
 	t.Run("testCacheMemsizeManual", testCacheMemsizeManual)
 	t.Run("is_cached", testCacheIsCached)
+	t.Run("force_set", testCacheForceSet)
 }
 
 func testCacheParallelism(t *testing.T) {
@@ -400,4 +401,81 @@ func testCacheIsCached(t *testing.T) {
 	time.Sleep(7500 * time.Millisecond)
 	// Entry should be removed by TTL watcher
 	assert.False(t, c.IsCached(3))
+}
+
+func testCacheForceSet(t *testing.T) {
+	t.Parallel()
+
+	loadCounter := 0
+
+	c, err := New(Params[int, string]{
+		Context: context.Background(),
+		Log:     test_utils.Logger(),
+		Name:    "test_cache_force_set",
+		LoadOneFunc: func(ID int) (entry *string, err error) {
+			loadCounter++
+			return test_utils.StringPointer("loaded_" + strconv.Itoa(ID)), nil
+		},
+		Timeouts:        cacheTestTimeouts,
+		AutomaticReload: AutomaticReloadDisabled,
+	})
+
+	assert.Nil(t, err)
+
+	// Test setting a new entry that doesn't exist
+	assert.False(t, c.IsCached(0))
+	c.ForceSet(0, test_utils.StringPointer("forced_value_0"))
+	assert.True(t, c.IsCached(0))
+	value := c.Get(0)
+	assert.Equal(t, "forced_value_0", *value)
+	assert.Equal(t, 0, loadCounter) // Load function should not be called
+
+	// Test overriding an existing entry
+	c.ForceSet(0, test_utils.StringPointer("forced_value_0_updated"))
+	assert.True(t, c.IsCached(0))
+	value = c.Get(0)
+	assert.Equal(t, "forced_value_0_updated", *value)
+	assert.Equal(t, 0, loadCounter) // Still no load calls
+
+	// Test overriding an entry that was loaded normally
+	_ = c.Get(1)
+	assert.Equal(t, 1, loadCounter)
+	assert.True(t, c.IsCached(1))
+	value = c.Get(1)
+	assert.Equal(t, "loaded_1", *value)
+
+	c.ForceSet(1, test_utils.StringPointer("forced_value_1"))
+	assert.True(t, c.IsCached(1))
+	value = c.Get(1)
+	assert.Equal(t, "forced_value_1", *value)
+	assert.Equal(t, 1, loadCounter) // No additional load calls
+
+	// Test that ForceSet respects TTL and ReloadInterval
+	c.ForceSet(2, test_utils.StringPointer("forced_value_2"))
+	assert.True(t, c.IsCached(2))
+	time.Sleep(3500 * time.Millisecond)
+	// After ReloadInterval (3s), entry should be expired
+	assert.False(t, c.IsCached(2))
+	// But entry should still exist in cache (not removed by TTL watcher yet)
+	c.mu.RLock()
+	_, exists := c.data[2]
+	c.mu.RUnlock()
+	assert.True(t, exists)
+
+	// Test setting nil value (should work, but entry will have nil value)
+	c.ForceSet(3, nil)
+	assert.True(t, c.IsCached(3))
+	value = c.Get(3)
+	assert.Nil(t, value)
+
+	// Test that ForceSet updates watchers correctly
+	c.ForceSet(4, test_utils.StringPointer("forced_value_4"))
+	assert.True(t, c.IsCached(4))
+	time.Sleep(7500 * time.Millisecond)
+	// After TTL (7s), entry should be removed by TTL watcher
+	assert.False(t, c.IsCached(4))
+	c.mu.RLock()
+	_, exists = c.data[4]
+	c.mu.RUnlock()
+	assert.False(t, exists)
 }
