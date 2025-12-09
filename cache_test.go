@@ -32,7 +32,7 @@ func TestCache(t *testing.T) {
 	t.Run("entry_automatic_reload_accessed", testCacheEntryAutomaticReloadAccessed)
 	t.Run("testCacheMemsizeCalculated", testCacheMemsizeCalculated)
 	t.Run("testCacheMemsizeManual", testCacheMemsizeManual)
-	t.Run("is_cached", testCacheIsCached)
+	t.Run("get_cached", testCacheGetCached)
 	t.Run("force_set", testCacheForceSet)
 }
 
@@ -344,7 +344,7 @@ func testCacheEntryAutomaticReloadAccessed(t *testing.T) {
 	assert.Equal(t, 0, len(c.data))
 }
 
-func testCacheIsCached(t *testing.T) {
+func testCacheGetCached(t *testing.T) {
 	t.Parallel()
 
 	c, err := New(Params[int, string]{
@@ -361,46 +361,52 @@ func testCacheIsCached(t *testing.T) {
 	assert.Nil(t, err)
 
 	// Test non-existent key
-	assert.False(t, c.IsCached(0))
+	assert.Nil(t, c.GetCached(0))
 
 	// Load a value into cache
 	_ = c.Get(0)
-	assert.True(t, c.IsCached(0))
+	assert.NotNil(t, c.GetCached(0))
+	assert.Equal(t, "value_0", *c.GetCached(0))
 
 	// Test another non-existent key
-	assert.False(t, c.IsCached(1))
+	assert.Nil(t, c.GetCached(1))
 
 	// Load another value
 	_ = c.Get(1)
-	assert.True(t, c.IsCached(1))
-	assert.True(t, c.IsCached(0))
+	assert.NotNil(t, c.GetCached(1))
+	assert.Equal(t, "value_1", *c.GetCached(1))
+	assert.NotNil(t, c.GetCached(0))
+	assert.Equal(t, "value_0", *c.GetCached(0))
 
 	// Wait for entry to expire (ReloadInterval is 3s, so after 3.5s it should be expired)
 	time.Sleep(3500 * time.Millisecond)
-	assert.False(t, c.IsCached(0))
-	assert.False(t, c.IsCached(1))
+	assert.Nil(t, c.GetCached(0))
+	assert.Nil(t, c.GetCached(1))
 
 	// Reload one entry
 	_ = c.Get(0)
-	assert.True(t, c.IsCached(0))
-	assert.False(t, c.IsCached(1))
+	assert.NotNil(t, c.GetCached(0))
+	assert.Equal(t, "value_0", *c.GetCached(0))
+	assert.Nil(t, c.GetCached(1))
 
 	// Test Remove
 	c.Remove(0)
-	assert.False(t, c.IsCached(0))
+	assert.Nil(t, c.GetCached(0))
 
 	// Test Invalidate - entry should still exist but be expired
 	_ = c.Get(2)
-	assert.True(t, c.IsCached(2))
+	assert.NotNil(t, c.GetCached(2))
+	assert.Equal(t, "value_2", *c.GetCached(2))
 	c.Invalidate(2)
-	assert.False(t, c.IsCached(2))
+	assert.Nil(t, c.GetCached(2))
 
 	// Wait for TTL expiration (TTL is 7s)
 	_ = c.Get(3)
-	assert.True(t, c.IsCached(3))
+	assert.NotNil(t, c.GetCached(3))
+	assert.Equal(t, "value_3", *c.GetCached(3))
 	time.Sleep(7500 * time.Millisecond)
 	// Entry should be removed by TTL watcher
-	assert.False(t, c.IsCached(3))
+	assert.Nil(t, c.GetCached(3))
 }
 
 func testCacheForceSet(t *testing.T) {
@@ -423,16 +429,18 @@ func testCacheForceSet(t *testing.T) {
 	assert.Nil(t, err)
 
 	// Test setting a new entry that doesn't exist
-	assert.False(t, c.IsCached(0))
+	assert.Nil(t, c.GetCached(0))
 	c.ForceSet(0, test_utils.StringPointer("forced_value_0"))
-	assert.True(t, c.IsCached(0))
+	assert.NotNil(t, c.GetCached(0))
+	assert.Equal(t, "forced_value_0", *c.GetCached(0))
 	value := c.Get(0)
 	assert.Equal(t, "forced_value_0", *value)
 	assert.Equal(t, 0, loadCounter) // Load function should not be called
 
 	// Test overriding an existing entry
 	c.ForceSet(0, test_utils.StringPointer("forced_value_0_updated"))
-	assert.True(t, c.IsCached(0))
+	assert.NotNil(t, c.GetCached(0))
+	assert.Equal(t, "forced_value_0_updated", *c.GetCached(0))
 	value = c.Get(0)
 	assert.Equal(t, "forced_value_0_updated", *value)
 	assert.Equal(t, 0, loadCounter) // Still no load calls
@@ -440,22 +448,25 @@ func testCacheForceSet(t *testing.T) {
 	// Test overriding an entry that was loaded normally
 	_ = c.Get(1)
 	assert.Equal(t, 1, loadCounter)
-	assert.True(t, c.IsCached(1))
+	assert.NotNil(t, c.GetCached(1))
+	assert.Equal(t, "loaded_1", *c.GetCached(1))
 	value = c.Get(1)
 	assert.Equal(t, "loaded_1", *value)
 
 	c.ForceSet(1, test_utils.StringPointer("forced_value_1"))
-	assert.True(t, c.IsCached(1))
+	assert.NotNil(t, c.GetCached(1))
+	assert.Equal(t, "forced_value_1", *c.GetCached(1))
 	value = c.Get(1)
 	assert.Equal(t, "forced_value_1", *value)
 	assert.Equal(t, 1, loadCounter) // No additional load calls
 
 	// Test that ForceSet respects TTL and ReloadInterval
 	c.ForceSet(2, test_utils.StringPointer("forced_value_2"))
-	assert.True(t, c.IsCached(2))
+	assert.NotNil(t, c.GetCached(2))
+	assert.Equal(t, "forced_value_2", *c.GetCached(2))
 	time.Sleep(3500 * time.Millisecond)
 	// After ReloadInterval (3s), entry should be expired
-	assert.False(t, c.IsCached(2))
+	assert.Nil(t, c.GetCached(2))
 	// But entry should still exist in cache (not removed by TTL watcher yet)
 	c.mu.RLock()
 	_, exists := c.data[2]
@@ -464,16 +475,17 @@ func testCacheForceSet(t *testing.T) {
 
 	// Test setting nil value (should work, but entry will have nil value)
 	c.ForceSet(3, nil)
-	assert.True(t, c.IsCached(3))
+	assert.Nil(t, c.GetCached(3))
 	value = c.Get(3)
 	assert.Nil(t, value)
 
 	// Test that ForceSet updates watchers correctly
 	c.ForceSet(4, test_utils.StringPointer("forced_value_4"))
-	assert.True(t, c.IsCached(4))
+	assert.NotNil(t, c.GetCached(4))
+	assert.Equal(t, "forced_value_4", *c.GetCached(4))
 	time.Sleep(7500 * time.Millisecond)
 	// After TTL (7s), entry should be removed by TTL watcher
-	assert.False(t, c.IsCached(4))
+	assert.Nil(t, c.GetCached(4))
 	c.mu.RLock()
 	_, exists = c.data[4]
 	c.mu.RUnlock()

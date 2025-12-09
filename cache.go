@@ -225,18 +225,22 @@ func (c *Cache[K, T]) Invalidate(ID K) {
 	}
 }
 
-func (c *Cache[K, T]) IsCached(ID K) bool {
+func (c *Cache[K, T]) GetCached(ID K) *T {
 	c.mu.RLock()
 	entry, exists := c.data[ID]
 	c.mu.RUnlock()
 
 	if !exists {
-		return false
+		return nil
 	}
 
 	// Check if entry is still valid (not expired)
 	nowMillis := time.Now().UnixMilli()
-	return nowMillis < entry.nextReload.Load()
+	if nowMillis >= entry.nextReload.Load() {
+		return nil
+	}
+
+	return entry.get()
 }
 
 // ForceSet forcefully sets a value in the cache, overriding any existing entry.
@@ -244,15 +248,15 @@ func (c *Cache[K, T]) IsCached(ID K) bool {
 // special cases where you need to directly manipulate cache contents.
 // The value will be cached with the normal TTL and ReloadInterval settings.
 func (c *Cache[K, T]) ForceSet(ID K, value *T) {
+	c.mu.RLock()
+	entry, exists := c.data[ID]
+	c.mu.RUnlock()
+
 	if c.metrics != nil {
 		c.metrics.ForceSetCount.Inc()
 	}
 
 	nowMillis := time.Now().UnixMilli()
-
-	c.mu.RLock()
-	entry, exists := c.data[ID]
-	c.mu.RUnlock()
 
 	// update existing entry
 	if exists {
