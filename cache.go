@@ -225,6 +225,8 @@ func (c *Cache[K, T]) Invalidate(ID K) {
 	}
 }
 
+// GetCached returns value and exists flag directly from cache
+// without any lazy loading or reloading
 func (c *Cache[K, T]) GetCached(ID K) (value *T, exists bool) {
 	c.mu.RLock()
 	entry, exists := c.data[ID]
