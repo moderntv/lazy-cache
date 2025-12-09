@@ -59,14 +59,14 @@ func (t *Timeouts) check() error {
 	}
 
 	if t.ReloadInterval > t.TTL {
-		return errors.New("ReloadInterval must be less than or equal to TTL")
+		return errors.New("reloadInterval must be less than or equal to TTL")
 	}
 
 	if t.Randomizer < 0 {
-		return errors.New("Randomizer cannot be negative")
+		return errors.New("randomizer cannot be negative")
 	}
 	if t.Randomizer > 1 {
-		return errors.New("Randomizer cannot be greater than 1")
+		return errors.New("randomizer cannot be greater than 1")
 	}
 
 	return nil

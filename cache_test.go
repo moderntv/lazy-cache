@@ -32,6 +32,7 @@ func TestCache(t *testing.T) {
 	t.Run("entry_automatic_reload_accessed", testCacheEntryAutomaticReloadAccessed)
 	t.Run("testCacheMemsizeCalculated", testCacheMemsizeCalculated)
 	t.Run("testCacheMemsizeManual", testCacheMemsizeManual)
+	t.Run("is_cached", testCacheIsCached)
 }
 
 func testCacheParallelism(t *testing.T) {
@@ -340,4 +341,63 @@ func testCacheEntryAutomaticReloadAccessed(t *testing.T) {
 	// 17s (ttl expiration at 16.5s)
 	assert.Equal(t, 4, loadCounter)
 	assert.Equal(t, 0, len(c.data))
+}
+
+func testCacheIsCached(t *testing.T) {
+	t.Parallel()
+
+	c, err := New(Params[int, string]{
+		Context: context.Background(),
+		Log:     test_utils.Logger(),
+		Name:    "test_cache_is_cached",
+		LoadOneFunc: func(ID int) (entry *string, err error) {
+			return test_utils.StringPointer("value_" + strconv.Itoa(ID)), nil
+		},
+		Timeouts:        cacheTestTimeouts,
+		AutomaticReload: AutomaticReloadDisabled,
+	})
+
+	assert.Nil(t, err)
+
+	// Test non-existent key
+	assert.False(t, c.IsCached(0))
+
+	// Load a value into cache
+	_ = c.Get(0)
+	assert.True(t, c.IsCached(0))
+
+	// Test another non-existent key
+	assert.False(t, c.IsCached(1))
+
+	// Load another value
+	_ = c.Get(1)
+	assert.True(t, c.IsCached(1))
+	assert.True(t, c.IsCached(0))
+
+	// Wait for entry to expire (ReloadInterval is 3s, so after 3.5s it should be expired)
+	time.Sleep(3500 * time.Millisecond)
+	assert.False(t, c.IsCached(0))
+	assert.False(t, c.IsCached(1))
+
+	// Reload one entry
+	_ = c.Get(0)
+	assert.True(t, c.IsCached(0))
+	assert.False(t, c.IsCached(1))
+
+	// Test Remove
+	c.Remove(0)
+	assert.False(t, c.IsCached(0))
+
+	// Test Invalidate - entry should still exist but be expired
+	_ = c.Get(2)
+	assert.True(t, c.IsCached(2))
+	c.Invalidate(2)
+	assert.False(t, c.IsCached(2))
+
+	// Wait for TTL expiration (TTL is 7s)
+	_ = c.Get(3)
+	assert.True(t, c.IsCached(3))
+	time.Sleep(7500 * time.Millisecond)
+	// Entry should be removed by TTL watcher
+	assert.False(t, c.IsCached(3))
 }

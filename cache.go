@@ -225,9 +225,19 @@ func (c *Cache[K, T]) Invalidate(ID K) {
 	}
 }
 
-// func (c *Cache[K, T]) IsCached(ID K) bool {
-// 	return false
-// }
+func (c *Cache[K, T]) IsCached(ID K) bool {
+	c.mu.RLock()
+	entry, exists := c.data[ID]
+	c.mu.RUnlock()
+
+	if !exists {
+		return false
+	}
+
+	// Check if entry is still valid (not expired)
+	nowMillis := time.Now().UnixMilli()
+	return nowMillis < entry.nextReload.Load()
+}
 
 func (c *Cache[K, T]) startPreloading(preloadChan <-chan LoadedEntry[K, T]) {
 	// read data from reload channel and store it to cache
