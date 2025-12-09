@@ -225,29 +225,29 @@ func (c *Cache[K, T]) Invalidate(ID K) {
 	}
 }
 
-func (c *Cache[K, T]) GetCached(ID K) *T {
+func (c *Cache[K, T]) GetCached(ID K) (value *T, exists bool) {
 	c.mu.RLock()
 	entry, exists := c.data[ID]
 	c.mu.RUnlock()
 
 	if !exists {
-		return nil
+		return nil, false
 	}
 
-	// Check if entry is still valid (not expired)
+	// check if entry is still valid (not expired)
 	nowMillis := time.Now().UnixMilli()
 	if nowMillis >= entry.nextReload.Load() {
-		return nil
+		return nil, false
 	}
 
-	return entry.get()
+	return entry.get(), true
 }
 
 // ForceSet forcefully sets a value in the cache, overriding any existing entry.
 // This function bypasses the normal load mechanism and should only be used in
 // special cases where you need to directly manipulate cache contents.
 // The value will be cached with the normal TTL and ReloadInterval settings.
-func (c *Cache[K, T]) ForceSet(ID K, value *T) {
+func (c *Cache[K, T]) ForceSet(ID K, value *T, err error) {
 	c.mu.RLock()
 	entry, exists := c.data[ID]
 	c.mu.RUnlock()
@@ -261,7 +261,7 @@ func (c *Cache[K, T]) ForceSet(ID K, value *T) {
 	// update existing entry
 	if exists {
 		entry.mu.Lock()
-		ttl := entry.set(value, nil, nowMillis, &c.timeouts, false)
+		ttl := entry.set(value, err, nowMillis, &c.timeouts, false)
 		entry.mu.Unlock()
 
 		c.setEntryWatchers(ID, ttl, entry, nowMillis)
@@ -277,7 +277,7 @@ func (c *Cache[K, T]) ForceSet(ID K, value *T) {
 	c.data[ID] = entry
 	c.mu.Unlock()
 
-	ttl := entry.set(value, nil, nowMillis, &c.timeouts, true)
+	ttl := entry.set(value, err, nowMillis, &c.timeouts, true)
 	entry.mu.Unlock()
 
 	c.setEntryWatchers(ID, ttl, entry, nowMillis)
