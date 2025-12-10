@@ -193,6 +193,26 @@ func (c *Cache[K, T]) Get(ID K) *T {
 	return entry.get()
 }
 
+// GetCached returns value and exists flag directly from cache
+// without any lazy loading or reloading
+func (c *Cache[K, T]) GetCached(ID K) (value *T, exists bool) {
+	c.mu.RLock()
+	entry, exists := c.data[ID]
+	c.mu.RUnlock()
+
+	if !exists {
+		return nil, false
+	}
+
+	// check if entry is still valid (not expired)
+	nowMillis := time.Now().UnixMilli()
+	if nowMillis >= entry.nextReload.Load() {
+		return nil, false
+	}
+
+	return entry.get(), true
+}
+
 func (c *Cache[K, T]) Remove(ID K) {
 	c.mu.Lock()
 
@@ -228,26 +248,6 @@ func (c *Cache[K, T]) Invalidate(ID K) {
 	if c.automaticReloadType != AutomaticReloadDisabled {
 		c.reloadWatcher.Push(ID, 0)
 	}
-}
-
-// GetCached returns value and exists flag directly from cache
-// without any lazy loading or reloading
-func (c *Cache[K, T]) GetCached(ID K) (value *T, exists bool) {
-	c.mu.RLock()
-	entry, exists := c.data[ID]
-	c.mu.RUnlock()
-
-	if !exists {
-		return nil, false
-	}
-
-	// check if entry is still valid (not expired)
-	nowMillis := time.Now().UnixMilli()
-	if nowMillis >= entry.nextReload.Load() {
-		return nil, false
-	}
-
-	return entry.get(), true
 }
 
 // ForceSet forcefully sets a value in the cache, overriding any existing entry.
@@ -319,6 +319,21 @@ func (c *Cache[K, T]) Ready() {
 	if c.preloadWG != nil {
 		c.preloadWG.Wait()
 	}
+}
+
+// Lock locks the cache's internal mutex for exclusive write access.
+// The caller must call Unlock when done. This allows external code to
+// perform atomic operations on the cache data (modifying them).
+// During the lock all following functions will be blocked: Get,
+// GetCached, Remove, Invalidate, ForceSet.
+func (c *Cache[K, T]) Lock() {
+	c.mu.Lock()
+}
+
+// Unlock unlocks the cache's internal mutex. It must be called after Lock
+// to enable using the cache again.
+func (c *Cache[K, T]) Unlock() {
+	c.mu.Unlock()
 }
 
 // addLoadedEntry adds already loaded entry to cache (if it makes sense)
