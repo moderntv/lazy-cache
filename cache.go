@@ -38,6 +38,8 @@ type Cache[K comparable, T any] struct {
 	// attributes protected by mutex
 	mu   sync.RWMutex
 	data map[K]*cachedEntry[T]
+	// preloading synchronization
+	preloadWG *sync.WaitGroup
 }
 
 func New[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
@@ -71,6 +73,8 @@ func New[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
 	}
 
 	if params.PreloadChan != nil {
+		c.preloadWG = &sync.WaitGroup{}
+		c.preloadWG.Add(1)
 		go c.startPreloading(params.PreloadChan)
 	} else {
 		c.log.Info().Msg("preloading disabled")
@@ -98,9 +102,10 @@ func New[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
 	}
 
 	if c.metrics != nil && params.Timeouts.MemsizeUpdate > 0 {
+		c.log.Debug().Msg("memory size calculation enabled")
 		go c.startMemoryMeassurement(params.Timeouts.MemsizeUpdate)
 	} else {
-		c.log.Info().Msg("memory size calculation is disabled")
+		c.log.Debug().Msg("memory size calculation disabled")
 	}
 
 	return
@@ -290,6 +295,8 @@ func (c *Cache[K, T]) ForceSet(ID K, value *T, err error) {
 }
 
 func (c *Cache[K, T]) startPreloading(preloadChan <-chan LoadedEntry[K, T]) {
+	defer c.preloadWG.Done()
+
 	// read data from reload channel and store it to cache
 	for {
 		select {
@@ -303,6 +310,14 @@ func (c *Cache[K, T]) startPreloading(preloadChan <-chan LoadedEntry[K, T]) {
 		case <-c.ctx.Done():
 			return
 		}
+	}
+}
+
+// Ready blocks until preloading is complete. If preloading is disabled,
+// it returns immediately.
+func (c *Cache[K, T]) Ready() {
+	if c.preloadWG != nil {
+		c.preloadWG.Wait()
 	}
 }
 
