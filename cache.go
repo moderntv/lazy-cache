@@ -77,7 +77,7 @@ func New[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
 		c.preloadWG.Add(1)
 		go c.startPreloading(params.PreloadChan)
 	} else {
-		c.log.Info().Msg("preloading disabled")
+		c.log.Debug().Msg("preloading disabled")
 	}
 
 	go c.startTTLWatcher()
@@ -98,7 +98,7 @@ func New[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
 		go c.startReloadWatcher()
 
 	} else {
-		c.log.Info().Msg("automatic reload disabled")
+		c.log.Debug().Msg("automatic reload disabled")
 	}
 
 	if c.metrics != nil && params.Timeouts.MemsizeUpdate > 0 {
