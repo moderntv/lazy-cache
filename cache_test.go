@@ -34,6 +34,8 @@ func TestCache(t *testing.T) {
 	t.Run("testCacheMemsizeManual", testCacheMemsizeManual)
 	t.Run("get_cached", testCacheGetCached)
 	t.Run("force_set", testCacheForceSet)
+	t.Run("expired_entry_concurrent_reload", testCacheExpiredEntryConcurrentReload)
+	t.Run("expired_entry_double_check", testCacheExpiredEntryDoubleCheck)
 }
 
 func testCacheParallelism(t *testing.T) {
@@ -601,4 +603,145 @@ func testCacheForceSet(t *testing.T) {
 	_, exists = c.data[7]
 	c.mu.RUnlock()
 	assert.False(t, exists)
+}
+
+// testCacheExpiredEntryConcurrentReload tests that concurrent Get calls on an expired entry
+// with automatic reload disabled only trigger a single reload (double-check pattern prevents duplicates)
+func testCacheExpiredEntryConcurrentReload(t *testing.T) {
+	t.Parallel()
+
+	loadCounter := atomic.Int64{}
+	loadDelay := 50 * time.Millisecond // Simulate slow load function
+
+	c, err := New(Params[int, string]{
+		Context: context.Background(),
+		Log:     test_utils.Logger(),
+		Name:    "test_cache_concurrent_reload",
+		LoadOneFunc: func(ID int) (entry *string, err error) {
+			loadCounter.Add(1)
+			time.Sleep(loadDelay) // Simulate slow loading
+			return test_utils.StringPointer("value_" + strconv.FormatInt(loadCounter.Load(), 10)), nil
+		},
+		Timeouts: Timeouts{
+			TTL:            10 * time.Second,
+			NotFoundTTL:    5 * time.Second,
+			ErrorTTL:       1 * time.Second,
+			ReloadInterval: 1 * time.Second, // Entry expires after 1 second
+			Randomizer:     0,
+		},
+		AutomaticReload: AutomaticReloadDisabled,
+	})
+
+	assert.Nil(t, err)
+
+	// Load entry initially
+	value := c.Get(0)
+	assert.Equal(t, "value_1", *value)
+	assert.Equal(t, int64(1), loadCounter.Load())
+
+	// Wait for entry to expire (ReloadInterval is 1s)
+	time.Sleep(1100 * time.Millisecond)
+
+	// Now make concurrent Get calls on expired entry
+	// All should wait for the first one to reload, then use the reloaded value
+	routines := 10
+	wg := sync.WaitGroup{}
+	results := make([]*string, routines)
+
+	for i := 0; i < routines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx] = c.Get(0)
+		}(i)
+	}
+
+	wg.Wait()
+
+	// All results should be the same (from single reload)
+	expectedValue := results[0]
+	assert.NotNil(t, expectedValue)
+	for i := 1; i < routines; i++ {
+		assert.Equal(t, expectedValue, results[i], "All concurrent Get calls should return the same value")
+	}
+
+	// Only one additional reload should have occurred (the first goroutine to acquire lock)
+	// Other goroutines should have used the double-check and returned the reloaded value
+	assert.Equal(t, int64(2), loadCounter.Load(), "Should only have 2 loads total (initial + one concurrent reload)")
+}
+
+// testCacheExpiredEntryDoubleCheck tests the double-check pattern where an entry
+// is reloaded by another goroutine while waiting for the lock
+func testCacheExpiredEntryDoubleCheck(t *testing.T) {
+	t.Parallel()
+
+	loadCounter := atomic.Int64{}
+	reloadStarted := make(chan struct{})
+	reloadComplete := make(chan struct{})
+
+	c, err := New(Params[int, string]{
+		Context: context.Background(),
+		Log:     test_utils.Logger(),
+		Name:    "test_cache_double_check",
+		LoadOneFunc: func(ID int) (entry *string, err error) {
+			count := loadCounter.Add(1)
+			if count == 1 {
+				// First load - return immediately
+				return test_utils.StringPointer("value_1"), nil
+			}
+			// Second load - signal start, wait for signal to complete
+			close(reloadStarted)
+			<-reloadComplete
+			return test_utils.StringPointer("value_2"), nil
+		},
+		Timeouts: Timeouts{
+			TTL:            10 * time.Second,
+			NotFoundTTL:    5 * time.Second,
+			ErrorTTL:       1 * time.Second,
+			ReloadInterval: 1 * time.Second,
+			Randomizer:     0,
+		},
+		AutomaticReload: AutomaticReloadDisabled,
+	})
+
+	assert.Nil(t, err)
+
+	// Load entry initially
+	value := c.Get(0)
+	assert.Equal(t, "value_1", *value)
+	assert.Equal(t, int64(1), loadCounter.Load())
+
+	// Wait for entry to expire
+	time.Sleep(1100 * time.Millisecond)
+
+	// Start first goroutine that will reload (and will wait for signal)
+	go func() {
+		_ = c.Get(0)
+	}()
+
+	// Wait for reload to start
+	<-reloadStarted
+
+	// Now start second goroutine - it should wait for lock, then use double-check
+	// to see that entry was already reloaded and return the new value
+	secondValue := make(chan *string, 1)
+	go func() {
+		secondValue <- c.Get(0)
+	}()
+
+	// Give second goroutine time to wait for lock
+	time.Sleep(10 * time.Millisecond)
+
+	// Complete the reload
+	close(reloadComplete)
+
+	// Wait for second goroutine to complete
+	result := <-secondValue
+
+	// Second goroutine should have used double-check and returned the reloaded value
+	assert.NotNil(t, result)
+	assert.Equal(t, "value_2", *result)
+
+	// Only 2 loads total (initial + one reload)
+	assert.Equal(t, int64(2), loadCounter.Load())
 }
