@@ -184,6 +184,7 @@ func (c *Cache[K, T]) Get(ID K) *T {
 	c.setEntryWatchers(ID, ttl, entry, nowMillis)
 
 	if c.metrics != nil {
+		c.metrics.ItemsCount.Inc()
 		c.metrics.LazyLoadCount.Inc()
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			c.metrics.ErrorLoadCount.Inc()
@@ -369,8 +370,9 @@ func (c *Cache[K, T]) addLoadedEntry(loadedEntry LoadedEntry[K, T], nowMillis in
 	c.setEntryWatchers(ID, ttl, entry, nowMillis)
 
 	if c.metrics != nil {
-		c.metrics.ItemsCount.Inc()
-		// c.memSizeValue.Add(entry.memSize())
+		if !exists {
+			c.metrics.ItemsCount.Inc()
+		}
 	}
 }
 
