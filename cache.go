@@ -200,6 +200,10 @@ func (c *Cache[K, T]) GetCached(ID K) (value *T, exists bool) {
 	entry, exists := c.data[ID]
 	c.mu.RUnlock()
 
+	if c.metrics != nil {
+		c.metrics.ReadsCount.Inc()
+	}
+
 	if !exists {
 		return nil, false
 	}
