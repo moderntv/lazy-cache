@@ -15,8 +15,9 @@ type Metrics struct {
 	ItemsCount                prometheus.Gauge
 	AutomaticLoadCount        prometheus.Counter
 	LazyLoadCount             prometheus.Counter
-	ForceSetCount             prometheus.Counter
 	ErrorLoadCount            prometheus.Counter
+	BatchLoadCount            prometheus.Counter
+	BatchLoadItemsCount       prometheus.Counter
 	ReadsCount                prometheus.Counter
 	ReceivedNatsInvalidations prometheus.Counter
 	MemoryUsage               prometheus.Gauge
@@ -47,17 +48,24 @@ func New(
 		ConstLabels: prometheus.Labels{labelName: name},
 	})
 
-	forceSetCount := registry.NewCounter(prometheus.CounterOpts{
-		Subsystem:   subSystem,
-		Name:        "force_sets",
-		Help:        "Total number of force set operations (direct cache manipulation)",
-		ConstLabels: prometheus.Labels{labelName: name},
-	})
-
 	errorLoadCount := registry.NewCounter(prometheus.CounterOpts{
 		Subsystem:   subSystem,
 		Name:        "error_loads",
 		Help:        "Count of item loads which ended with an error (except not found)",
+		ConstLabels: prometheus.Labels{labelName: name},
+	})
+
+	batchLoadCount := registry.NewCounter(prometheus.CounterOpts{
+		Subsystem:   subSystem,
+		Name:        "batch_loads",
+		Help:        "Total number of batch item loads (one call of LoadMultipleFunc)",
+		ConstLabels: prometheus.Labels{labelName: name},
+	})
+
+	batchLoadItemsCount := registry.NewCounter(prometheus.CounterOpts{
+		Subsystem:   subSystem,
+		Name:        "batch_load_items",
+		Help:        "Total number of items requested from LoadMultipleFunc",
 		ConstLabels: prometheus.Labels{labelName: name},
 	})
 
@@ -97,12 +105,17 @@ func New(
 		return
 	}
 
-	err = registry.Register(metricsPrefix+name+"_force_set_count", forceSetCount)
+	err = registry.Register(metricsPrefix+name+"_error_load_count", errorLoadCount)
 	if err != nil {
 		return
 	}
 
-	err = registry.Register(metricsPrefix+name+"_error_load_count", errorLoadCount)
+	err = registry.Register(metricsPrefix+name+"_batch_load_count", batchLoadCount)
+	if err != nil {
+		return
+	}
+
+	err = registry.Register(metricsPrefix+name+"_batch_load_items_count", batchLoadItemsCount)
 	if err != nil {
 		return
 	}
@@ -126,8 +139,9 @@ func New(
 		ItemsCount:                itemsCount,
 		AutomaticLoadCount:        automaticLoadCount,
 		LazyLoadCount:             lazyLoadCount,
-		ForceSetCount:             forceSetCount,
 		ErrorLoadCount:            errorLoadCount,
+		BatchLoadCount:            batchLoadCount,
+		BatchLoadItemsCount:       batchLoadItemsCount,
 		ReadsCount:                readsCount,
 		ReceivedNatsInvalidations: receivedNatsInvalidations,
 		MemoryUsage:               memoryUsage,

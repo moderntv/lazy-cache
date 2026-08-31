@@ -23,7 +23,13 @@ type LoadedEntry[K comparable, T any] struct {
 }
 
 type LoadOneFunc[K comparable, T any] func(ID K) (entry *T, err error)
-type LoadMultipleFunc[K comparable, T any] func(IDs []K) (entries []LoadedEntry[K, *T])
+
+// LoadMultipleFunc loads multiple entries at once (see GetMultiple).
+// The loader does not have to return an entry for every requested ID - IDs
+// missing in the result are stored into cache as not-found by the cache
+// itself. The loader may also report a missing entry explicitly by returning
+// LoadedEntry with ErrNotFound.
+type LoadMultipleFunc[K comparable, T any] func(IDs []K) (entries []LoadedEntry[K, T])
 
 type Params[K comparable, T any] struct {
 	Context         context.Context

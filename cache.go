@@ -194,6 +194,114 @@ func (c *Cache[K, T]) Get(ID K) *T {
 	return entry.get()
 }
 
+// GetMultiple returns values for the given IDs. Entries which are still valid
+// in cache are served from cache, all the remaining IDs are loaded by
+// LoadMultipleFunc in a single call. Duplicate IDs on the input are merged.
+//
+// Keys missing in the returned map mean "not found" (or the load has failed) -
+// the map never contains a nil value.
+//
+// The loader does not have to return an entry for every requested ID. IDs
+// which are missing in its result are stored into cache as not-found, so the
+// following GetMultiple call does not ask the loader for them again.
+//
+// If LoadMultipleFunc is not set, GetMultiple degrades to calling Get for each
+// ID.
+//
+// Unlike Get, GetMultiple does NOT do single-flight. Two concurrent batches
+// sharing an ID - or a batch concurrent with Get of the same ID - load that
+// entry more than once. Both loads store the same value, so the only cost is
+// a redundant load; preloading behaves the same way.
+func (c *Cache[K, T]) GetMultiple(ids []K) (values map[K]*T) {
+	values = make(map[K]*T, len(ids))
+
+	if len(ids) == 0 {
+		return
+	}
+
+	// deduplicate input IDs, keep their original order
+	uniqueIDs := make(map[K]struct{}, len(ids))
+	for _, id := range ids {
+		uniqueIDs[id] = struct{}{}
+	}
+
+	// no batch loader available, fall back to loading entries one by one
+	// (Get maintains its own metrics)
+	if c.loadMultipleFunc == nil {
+		for id := range uniqueIDs {
+			value := c.Get(id)
+			if value != nil {
+				values[id] = value
+			}
+		}
+
+		return
+	}
+
+	if c.metrics != nil {
+		c.metrics.ReadsCount.Add(float64(len(ids)))
+	}
+
+	nowMillis := time.Now().UnixMilli()
+
+	// serve what is valid in cache, collect the rest for the batch load
+	toLoad := make([]K, 0, len(uniqueIDs))
+
+	c.mu.RLock()
+	for id := range uniqueIDs {
+		entry, exists := c.data[id]
+		if !exists || nowMillis >= entry.nextReload.Load() {
+			toLoad = append(toLoad, id)
+			continue
+		}
+
+		value := entry.get()
+		if value != nil {
+			values[id] = value
+		}
+	}
+	c.mu.RUnlock()
+
+	if len(toLoad) == 0 {
+		return
+	}
+
+	if c.metrics != nil {
+		c.metrics.BatchLoadCount.Inc()
+		c.metrics.BatchLoadItemsCount.Add(float64(len(toLoad)))
+	}
+
+	loadedEntries := c.loadMultipleFunc(toLoad)
+
+	loadedIDs := make(map[K]struct{}, len(loadedEntries))
+	for _, loadedEntry := range loadedEntries {
+		loadedIDs[loadedEntry.ID] = struct{}{}
+
+		c.addLoadedEntry(loadedEntry, nowMillis)
+
+		if loadedEntry.Err != nil || loadedEntry.Value == nil {
+			continue
+		}
+		_, requested := uniqueIDs[loadedEntry.ID]
+		if requested {
+			values[loadedEntry.ID] = loadedEntry.Value
+		}
+	}
+
+	// IDs the loader did not return are cached as not-found, otherwise every
+	// following GetMultiple would ask the loader for them again
+	for _, ID := range toLoad {
+		_, loaded := loadedIDs[ID]
+		if loaded {
+			continue
+		}
+
+		c.addLoadedEntry(LoadedEntry[K, T]{ID: ID, Err: ErrNotFound}, nowMillis)
+	}
+
+	return
+}
+
 // GetCached returns value and exists flag directly from cache
 // without any lazy loading or reloading
 func (c *Cache[K, T]) GetCached(ID K) (value *T, exists bool) {
@@ -255,50 +363,6 @@ func (c *Cache[K, T]) Invalidate(ID K) {
 	}
 }
 
-// ForceSet forcefully sets a value in the cache, overriding any existing entry.
-// This function bypasses the normal load mechanism and should only be used in
-// special cases where you need to directly manipulate cache contents.
-// The value will be cached with the normal TTL and ReloadInterval settings.
-func (c *Cache[K, T]) ForceSet(ID K, value *T, err error) {
-	c.mu.RLock()
-	entry, exists := c.data[ID]
-	c.mu.RUnlock()
-
-	if c.metrics != nil {
-		c.metrics.ForceSetCount.Inc()
-	}
-
-	nowMillis := time.Now().UnixMilli()
-
-	// update existing entry
-	if exists {
-		entry.mu.Lock()
-		ttl := entry.set(value, err, nowMillis, &c.timeouts, false)
-		entry.mu.Unlock()
-
-		c.setEntryWatchers(ID, ttl, entry, nowMillis)
-
-		return
-	}
-
-	// add new entry
-	entry = &cachedEntry[T]{}
-	entry.mu.Lock()
-
-	c.mu.Lock()
-	c.data[ID] = entry
-	c.mu.Unlock()
-
-	ttl := entry.set(value, err, nowMillis, &c.timeouts, true)
-	entry.mu.Unlock()
-
-	c.setEntryWatchers(ID, ttl, entry, nowMillis)
-
-	if c.metrics != nil {
-		c.metrics.ItemsCount.Inc()
-	}
-}
-
 func (c *Cache[K, T]) startPreloading(preloadChan <-chan LoadedEntry[K, T]) {
 	defer c.preloadWG.Done()
 
@@ -330,7 +394,7 @@ func (c *Cache[K, T]) Ready() {
 // The caller must call Unlock when done. This allows external code to
 // perform atomic operations on the cache data (modifying them).
 // During the lock all following functions will be blocked: Get,
-// GetCached, Remove, Invalidate, ForceSet.
+// GetMultiple, GetCached, Remove, Invalidate.
 func (c *Cache[K, T]) Lock() {
 	c.mu.Lock()
 }
@@ -346,28 +410,29 @@ func (c *Cache[K, T]) addLoadedEntry(loadedEntry LoadedEntry[K, T], nowMillis in
 	entry := &cachedEntry[T]{}
 	ttl := entry.set(loadedEntry.Value, loadedEntry.Err, nowMillis, &c.timeouts, true)
 
-	ID := loadedEntry.ID
+	id := loadedEntry.ID
+
+	loadFailed := loadedEntry.Err != nil && !errors.Is(loadedEntry.Err, ErrNotFound)
+	if c.metrics != nil && loadFailed {
+		c.metrics.ErrorLoadCount.Inc()
+	}
 
 	c.mu.Lock()
 
-	_, exists := c.data[ID]
+	_, exists := c.data[id]
 	// do not override existing entry in case of error (except NotFound)
-	if exists && loadedEntry.Err != nil && !errors.Is(loadedEntry.Err, ErrNotFound) {
+	if exists && loadFailed {
 		c.mu.Unlock()
-
-		if c.metrics != nil {
-			c.metrics.ErrorLoadCount.Inc()
-		}
 
 		return
 	}
 
-	c.data[ID] = entry
+	c.data[id] = entry
 
 	c.mu.Unlock()
 
 	// update TTL watcher
-	c.setEntryWatchers(ID, ttl, entry, nowMillis)
+	c.setEntryWatchers(id, ttl, entry, nowMillis)
 
 	if c.metrics != nil {
 		if !exists {
