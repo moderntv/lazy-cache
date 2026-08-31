@@ -23,6 +23,23 @@ var cacheTestTimeouts = Timeouts{
 	Randomizer:     0,
 }
 
+// cacheEntryOf reads an entry directly from the cache map. Tests must not touch
+// c.data without the lock - background watchers write into it concurrently.
+func cacheEntryOf[K comparable, T any](c *Cache[K, T], ID K) *cachedEntry[T] {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.data[ID]
+}
+
+// cacheSize returns the number of entries in the cache map (see cacheEntryOf)
+func cacheSize[K comparable, T any](c *Cache[K, T]) int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return len(c.data)
+}
+
 func TestCache(t *testing.T) {
 	t.Run("parallelism", testCacheParallelism)
 	t.Run("entries_expiration", testCacheEntriesExpiration)
@@ -193,31 +210,31 @@ func testCacheEntriesExpiration(t *testing.T) {
 	assert.Nil(t, err)
 
 	// 0s
-	assert.Equal(t, 0, len(c.data))
+	assert.Equal(t, 0, cacheSize(c))
 	_ = c.Get(0)
-	assert.Equal(t, 1, len(c.data))
+	assert.Equal(t, 1, cacheSize(c))
 	_ = c.Get(1)
-	assert.Equal(t, 2, len(c.data))
+	assert.Equal(t, 2, cacheSize(c))
 	_ = c.Get(2)
-	assert.Equal(t, 3, len(c.data))
+	assert.Equal(t, 3, cacheSize(c))
 	time.Sleep(500 * time.Millisecond)
 	// 0.5s (all items in cache)
-	assert.NotNil(t, c.data[0])
-	assert.NotNil(t, c.data[1])
-	assert.NotNil(t, c.data[2])
+	assert.NotNil(t, cacheEntryOf(c, 0))
+	assert.NotNil(t, cacheEntryOf(c, 1))
+	assert.NotNil(t, cacheEntryOf(c, 2))
 	time.Sleep(1000 * time.Millisecond)
 	// 1.5s (removed error item)
-	assert.Nil(t, c.data[0])
-	assert.NotNil(t, c.data[1])
-	assert.NotNil(t, c.data[2])
+	assert.Nil(t, cacheEntryOf(c, 0))
+	assert.NotNil(t, cacheEntryOf(c, 1))
+	assert.NotNil(t, cacheEntryOf(c, 2))
 	time.Sleep(4500 * time.Millisecond)
 	// 6s (removed not found item)
-	assert.Nil(t, c.data[0])
-	assert.Nil(t, c.data[1])
-	assert.NotNil(t, c.data[2])
+	assert.Nil(t, cacheEntryOf(c, 0))
+	assert.Nil(t, cacheEntryOf(c, 1))
+	assert.NotNil(t, cacheEntryOf(c, 2))
 	time.Sleep(2000 * time.Millisecond)
 	// 8s (removed all items)
-	assert.Equal(t, 0, len(c.data))
+	assert.Equal(t, 0, cacheSize(c))
 }
 
 func testCacheEntryTTLProlong(t *testing.T) {
@@ -237,24 +254,24 @@ func testCacheEntryTTLProlong(t *testing.T) {
 	assert.Nil(t, err)
 
 	// 0s
-	assert.Nil(t, c.data[0])
+	assert.Nil(t, cacheEntryOf(c, 0))
 	_ = c.Get(0) // lazy loaded
-	assert.True(t, c.data[0].accessed.Load())
-	assert.NotNil(t, c.data[0])
+	assert.True(t, cacheEntryOf(c, 0).accessed.Load())
+	assert.NotNil(t, cacheEntryOf(c, 0))
 	time.Sleep(4 * time.Second)
 	// 4s
-	assert.NotNil(t, c.data[0])
-	assert.True(t, c.data[0].accessed.Load())
+	assert.NotNil(t, cacheEntryOf(c, 0))
+	assert.True(t, cacheEntryOf(c, 0).accessed.Load())
 	_ = c.Get(0) // lazy reloaded, TTL at 11s
-	assert.True(t, c.data[0].accessed.Load())
-	assert.NotNil(t, c.data[0])
+	assert.True(t, cacheEntryOf(c, 0).accessed.Load())
+	assert.NotNil(t, cacheEntryOf(c, 0))
 	time.Sleep(6 * time.Second)
 	// 10s
-	assert.True(t, c.data[0].accessed.Load())
-	assert.NotNil(t, c.data[0])
+	assert.True(t, cacheEntryOf(c, 0).accessed.Load())
+	assert.NotNil(t, cacheEntryOf(c, 0))
 	time.Sleep(2 * time.Second)
 	// 12s
-	assert.Nil(t, c.data[0])
+	assert.Nil(t, cacheEntryOf(c, 0))
 }
 
 func testCacheEntryAutomaticReloadAll(t *testing.T) {
@@ -282,15 +299,15 @@ func testCacheEntryAutomaticReloadAll(t *testing.T) {
 	time.Sleep(6500 * time.Millisecond)
 	// 6.5 s
 	assert.Equal(t, 3, loadCounter)
-	assert.Equal(t, 1, len(c.data))
+	assert.Equal(t, 1, cacheSize(c))
 	time.Sleep(3 * time.Second)
 	// 9.5 s
 	assert.Equal(t, 4, loadCounter)
-	assert.Equal(t, 1, len(c.data))
+	assert.Equal(t, 1, cacheSize(c))
 	time.Sleep(1 * time.Second)
 	// 10.5 s
 	assert.Equal(t, 4, loadCounter)
-	assert.Equal(t, 0, len(c.data))
+	assert.Equal(t, 0, cacheSize(c))
 	time.Sleep(3 * time.Second)
 	// 13.5 s
 	assert.Equal(t, 4, loadCounter)
@@ -320,13 +337,13 @@ func testCacheEntryAutomaticReloadAccessed(t *testing.T) {
 	time.Sleep(6500 * time.Millisecond)
 	// 6.5 s (1x automatically reloaded)
 	assert.Equal(t, 2, loadCounter)
-	assert.Equal(t, 1, len(c.data))
+	assert.Equal(t, 1, cacheSize(c))
 	_ = c.Get(0) // lazy reload at 6.5s
 	assert.Equal(t, 3, loadCounter)
 	time.Sleep(2 * time.Second)
 	// 8.5 s (2 seconds after lazy reload)
 	assert.Equal(t, 3, loadCounter)
-	assert.Equal(t, 1, len(c.data))
+	assert.Equal(t, 1, cacheSize(c))
 	_ = c.Get(0)
 	assert.Equal(t, 3, loadCounter)
 	time.Sleep(2 * time.Second)
@@ -335,15 +352,15 @@ func testCacheEntryAutomaticReloadAccessed(t *testing.T) {
 	time.Sleep(2500 * time.Millisecond)
 	// 13s (no automatic reload)
 	assert.Equal(t, 4, loadCounter)
-	assert.Equal(t, 1, len(c.data))
+	assert.Equal(t, 1, cacheSize(c))
 	time.Sleep(3 * time.Second)
 	// 16s (no ttl expiration yet)
 	assert.Equal(t, 4, loadCounter)
-	assert.Equal(t, 1, len(c.data))
+	assert.Equal(t, 1, cacheSize(c))
 	time.Sleep(1 * time.Second)
 	// 17s (ttl expiration at 16.5s)
 	assert.Equal(t, 4, loadCounter)
-	assert.Equal(t, 0, len(c.data))
+	assert.Equal(t, 0, cacheSize(c))
 }
 
 func testCacheGetCached(t *testing.T) {
@@ -744,4 +761,552 @@ func testCacheExpiredEntryDoubleCheck(t *testing.T) {
 
 	// Only 2 loads total (initial + one reload)
 	assert.Equal(t, int64(2), loadCounter.Load())
+}
+
+// batchLoaderSpy records what was requested from LoadMultipleFunc
+type batchLoaderSpy struct {
+	mu       sync.Mutex
+	calls    int
+	requests [][]int
+}
+
+func (s *batchLoaderSpy) record(IDs []int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.calls++
+	s.requests = append(s.requests, append([]int(nil), IDs...))
+}
+
+func (s *batchLoaderSpy) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.calls
+}
+
+// lastRequest returns IDs of the last LoadMultipleFunc call
+func (s *batchLoaderSpy) lastRequest() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(s.requests) == 0 {
+		return nil
+	}
+
+	return s.requests[len(s.requests)-1]
+}
+
+func TestGetMultipleAllFromCache(t *testing.T) {
+	t.Parallel()
+
+	spy := &batchLoaderSpy{}
+
+	c, err := New(Params[int, string]{
+		Context: context.Background(),
+		Log:     test_utils.Logger(),
+		Name:    "test_get_multiple_all_from_cache",
+		LoadOneFunc: func(ID int) (entry *string, err error) {
+			return test_utils.StringPointer("value_" + strconv.Itoa(ID)), nil
+		},
+		LoadMultipleFunc: func(IDs []int) (entries []LoadedEntry[int, string]) {
+			spy.record(IDs)
+			for _, ID := range IDs {
+				entries = append(entries, LoadedEntry[int, string]{
+					ID:    ID,
+					Value: test_utils.StringPointer("batch_" + strconv.Itoa(ID)),
+				})
+			}
+			return
+		},
+		Timeouts:        cacheTestTimeouts,
+		AutomaticReload: AutomaticReloadDisabled,
+	})
+
+	assert.Nil(t, err)
+
+	// fill the cache
+	IDs := []int{0, 1, 2, 3, 4}
+	for _, ID := range IDs {
+		_ = c.Get(ID)
+	}
+	assert.Equal(t, 0, spy.callCount())
+
+	values := c.GetMultiple(IDs)
+
+	assert.Equal(t, 0, spy.callCount(), "batch loader must not be called when everything is in cache")
+	assert.Equal(t, len(IDs), len(values))
+	for _, ID := range IDs {
+		assert.Equal(t, "value_"+strconv.Itoa(ID), *values[ID])
+	}
+}
+
+func TestGetMultiplePartialHit(t *testing.T) {
+	t.Parallel()
+
+	spy := &batchLoaderSpy{}
+
+	c, err := New(Params[int, string]{
+		Context:         context.Background(),
+		Log:             test_utils.Logger(),
+		MetricsRegistry: test_utils.Metrics("test_get_multiple_partial_hit"),
+		Name:            "test_get_multiple_partial_hit",
+		LoadOneFunc: func(ID int) (entry *string, err error) {
+			return test_utils.StringPointer("one_" + strconv.Itoa(ID)), nil
+		},
+		LoadMultipleFunc: func(IDs []int) (entries []LoadedEntry[int, string]) {
+			spy.record(IDs)
+			for _, ID := range IDs {
+				entries = append(entries, LoadedEntry[int, string]{
+					ID:    ID,
+					Value: test_utils.StringPointer("batch_" + strconv.Itoa(ID)),
+				})
+			}
+			return
+		},
+		Timeouts:        cacheTestTimeouts,
+		AutomaticReload: AutomaticReloadDisabled,
+	})
+
+	assert.Nil(t, err)
+
+	// first half is already in cache
+	for _, ID := range []int{0, 1, 2, 3, 4} {
+		_ = c.Get(ID)
+	}
+
+	values := c.GetMultiple([]int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9})
+
+	assert.Equal(t, 1, spy.callCount())
+	assert.ElementsMatch(t, []int{5, 6, 7, 8, 9}, spy.lastRequest(), "only missing IDs must be sent to the batch loader")
+
+	assert.Equal(t, 10, len(values))
+	for _, ID := range []int{0, 1, 2, 3, 4} {
+		assert.Equal(t, "one_"+strconv.Itoa(ID), *values[ID])
+	}
+	for _, ID := range []int{5, 6, 7, 8, 9} {
+		assert.Equal(t, "batch_"+strconv.Itoa(ID), *values[ID])
+	}
+}
+
+func TestGetMultipleMissingIDs(t *testing.T) {
+	t.Parallel()
+
+	spy := &batchLoaderSpy{}
+
+	c, err := New(Params[int, string]{
+		Context: context.Background(),
+		Log:     test_utils.Logger(),
+		Name:    "test_get_multiple_missing_ids",
+		LoadOneFunc: func(ID int) (entry *string, err error) {
+			return test_utils.StringPointer("one_" + strconv.Itoa(ID)), nil
+		},
+		// loader knows only even IDs and silently omits the rest
+		LoadMultipleFunc: func(IDs []int) (entries []LoadedEntry[int, string]) {
+			spy.record(IDs)
+			for _, ID := range IDs {
+				if ID%2 != 0 {
+					continue
+				}
+				entries = append(entries, LoadedEntry[int, string]{
+					ID:    ID,
+					Value: test_utils.StringPointer("batch_" + strconv.Itoa(ID)),
+				})
+			}
+			return
+		},
+		Timeouts:        cacheTestTimeouts,
+		AutomaticReload: AutomaticReloadDisabled,
+	})
+
+	assert.Nil(t, err)
+
+	IDs := []int{0, 1, 2, 3}
+	values := c.GetMultiple(IDs)
+
+	assert.Equal(t, 1, spy.callCount())
+	assert.ElementsMatch(t, IDs, spy.lastRequest())
+
+	// odd IDs were not returned by the loader
+	assert.Equal(t, 2, len(values))
+	assert.Equal(t, "batch_0", *values[0])
+	assert.Equal(t, "batch_2", *values[2])
+	_, exists := values[1]
+	assert.False(t, exists)
+	_, exists = values[3]
+	assert.False(t, exists)
+
+	// missing IDs must be cached as not-found
+	for _, ID := range []int{1, 3} {
+		value, cached := c.GetCached(ID)
+		assert.Nil(t, value)
+		assert.True(t, cached, "ID %d must be cached as not-found", ID)
+	}
+
+	// second call must be fully served from cache
+	values = c.GetMultiple(IDs)
+
+	assert.Equal(t, 1, spy.callCount(), "not-found IDs must not be requested again")
+	assert.Equal(t, 2, len(values))
+	assert.Equal(t, "batch_0", *values[0])
+	assert.Equal(t, "batch_2", *values[2])
+}
+
+func TestGetMultipleFallback(t *testing.T) {
+	t.Parallel()
+
+	loadCounter := atomic.Int64{}
+
+	c, err := New(Params[int, string]{
+		Context: context.Background(),
+		Log:     test_utils.Logger(),
+		Name:    "test_get_multiple_fallback",
+		LoadOneFunc: func(ID int) (entry *string, err error) {
+			loadCounter.Add(1)
+
+			if ID%3 == 1 {
+				return nil, ErrNotFound
+			}
+			if ID%3 == 2 {
+				return nil, errors.New("adhoc error")
+			}
+
+			return test_utils.StringPointer("one_" + strconv.Itoa(ID)), nil
+		},
+		// LoadMultipleFunc intentionally not set
+		Timeouts:        cacheTestTimeouts,
+		AutomaticReload: AutomaticReloadDisabled,
+	})
+
+	assert.Nil(t, err)
+
+	IDs := []int{0, 1, 2, 3}
+	values := c.GetMultiple(IDs)
+
+	assert.Equal(t, int64(4), loadCounter.Load(), "fallback must load every ID via LoadOneFunc")
+
+	// only successfully loaded IDs are present
+	assert.Equal(t, 2, len(values))
+	assert.Equal(t, "one_0", *values[0])
+	assert.Equal(t, "one_3", *values[3])
+
+	// results are identical to what Get returns
+	for _, ID := range IDs {
+		assert.Equal(t, c.Get(ID), values[ID])
+	}
+}
+
+func TestGetMultipleDuplicateIDs(t *testing.T) {
+	t.Parallel()
+
+	spy := &batchLoaderSpy{}
+
+	c, err := New(Params[int, string]{
+		Context: context.Background(),
+		Log:     test_utils.Logger(),
+		Name:    "test_get_multiple_duplicate_ids",
+		LoadOneFunc: func(ID int) (entry *string, err error) {
+			return test_utils.StringPointer("one_" + strconv.Itoa(ID)), nil
+		},
+		LoadMultipleFunc: func(IDs []int) (entries []LoadedEntry[int, string]) {
+			spy.record(IDs)
+			for _, ID := range IDs {
+				entries = append(entries, LoadedEntry[int, string]{
+					ID:    ID,
+					Value: test_utils.StringPointer("batch_" + strconv.Itoa(ID)),
+				})
+			}
+			return
+		},
+		Timeouts:        cacheTestTimeouts,
+		AutomaticReload: AutomaticReloadDisabled,
+	})
+
+	assert.Nil(t, err)
+
+	values := c.GetMultiple([]int{1, 1, 2})
+
+	assert.Equal(t, 1, spy.callCount())
+	assert.ElementsMatch(t, []int{1, 2}, spy.lastRequest(), "duplicate IDs must be merged")
+
+	assert.Equal(t, 2, len(values))
+	assert.Equal(t, "batch_1", *values[1])
+	assert.Equal(t, "batch_2", *values[2])
+}
+
+func TestGetMultipleError(t *testing.T) {
+	t.Parallel()
+
+	timeouts := Timeouts{
+		TTL:            10 * time.Second,
+		NotFoundTTL:    5 * time.Second,
+		ErrorTTL:       1 * time.Second,
+		ReloadInterval: 1 * time.Second,
+		Randomizer:     0,
+	}
+
+	spy := &batchLoaderSpy{}
+
+	c, err := New(Params[int, string]{
+		Context: context.Background(),
+		Log:     test_utils.Logger(),
+		Name:    "test_get_multiple_error",
+		LoadOneFunc: func(ID int) (entry *string, err error) {
+			return test_utils.StringPointer("one_" + strconv.Itoa(ID)), nil
+		},
+		LoadMultipleFunc: func(IDs []int) (entries []LoadedEntry[int, string]) {
+			spy.record(IDs)
+			for _, ID := range IDs {
+				entries = append(entries, LoadedEntry[int, string]{
+					ID:  ID,
+					Err: errors.New("adhoc error"),
+				})
+			}
+			return
+		},
+		Timeouts:        timeouts,
+		AutomaticReload: AutomaticReloadDisabled,
+	})
+
+	assert.Nil(t, err)
+
+	// ID 1 is already in cache with a valid value, ID 0 is not cached at all
+	_ = c.Get(1)
+
+	// let both entries expire so that they are sent to the batch loader
+	time.Sleep(1100 * time.Millisecond)
+
+	values := c.GetMultiple([]int{0, 1})
+
+	assert.Equal(t, 1, spy.callCount())
+	assert.Equal(t, 0, len(values), "failed loads must not appear in the result")
+
+	// new entry is stored with ErrorTTL
+	c.mu.RLock()
+	entry, exists := c.data[0]
+	c.mu.RUnlock()
+	assert.True(t, exists)
+	assert.Nil(t, entry.value.Load())
+
+	// existing entry must not be overwritten by an error
+	c.mu.RLock()
+	entry, exists = c.data[1]
+	c.mu.RUnlock()
+	assert.True(t, exists)
+	assert.NotNil(t, entry.value.Load())
+	assert.Equal(t, "one_1", *entry.value.Load())
+
+	// after ErrorTTL (1s) the errored entry is dropped by the TTL watcher,
+	// the untouched one survives (its TTL is 10s)
+	time.Sleep(1500 * time.Millisecond)
+
+	c.mu.RLock()
+	_, exists = c.data[0]
+	c.mu.RUnlock()
+	assert.False(t, exists)
+
+	c.mu.RLock()
+	_, exists = c.data[1]
+	c.mu.RUnlock()
+	assert.True(t, exists)
+}
+
+func TestGetMultipleExpiredEntry(t *testing.T) {
+	t.Parallel()
+
+	timeouts := Timeouts{
+		TTL:            10 * time.Second,
+		NotFoundTTL:    5 * time.Second,
+		ErrorTTL:       1 * time.Second,
+		ReloadInterval: 1 * time.Second,
+		Randomizer:     0,
+	}
+
+	spy := &batchLoaderSpy{}
+
+	c, err := New(Params[int, string]{
+		Context: context.Background(),
+		Log:     test_utils.Logger(),
+		Name:    "test_get_multiple_expired_entry",
+		LoadOneFunc: func(ID int) (entry *string, err error) {
+			return test_utils.StringPointer("one_" + strconv.Itoa(ID)), nil
+		},
+		LoadMultipleFunc: func(IDs []int) (entries []LoadedEntry[int, string]) {
+			spy.record(IDs)
+			for _, ID := range IDs {
+				entries = append(entries, LoadedEntry[int, string]{
+					ID:    ID,
+					Value: test_utils.StringPointer("batch_" + strconv.Itoa(ID)),
+				})
+			}
+			return
+		},
+		Timeouts:        timeouts,
+		AutomaticReload: AutomaticReloadDisabled,
+	})
+
+	assert.Nil(t, err)
+
+	_ = c.Get(0)
+	_ = c.Get(1)
+
+	// both entries are still valid
+	values := c.GetMultiple([]int{0, 1})
+	assert.Equal(t, 0, spy.callCount())
+	assert.Equal(t, "one_0", *values[0])
+
+	// let entry 0 expire (ReloadInterval is 1s), keep entry 1 fresh
+	time.Sleep(1100 * time.Millisecond)
+	_ = c.Get(1)
+
+	values = c.GetMultiple([]int{0, 1})
+
+	assert.Equal(t, 1, spy.callCount())
+	assert.ElementsMatch(t, []int{0}, spy.lastRequest(), "only the expired ID belongs to the batch")
+
+	assert.Equal(t, "batch_0", *values[0])
+	assert.Equal(t, "one_1", *values[1])
+}
+
+func TestGetMultipleConcurrent(t *testing.T) {
+	t.Parallel()
+
+	batchLoadCounter := atomic.Int64{}
+	oneLoadCounter := atomic.Int64{}
+
+	c, err := New(Params[int, string]{
+		Context: context.Background(),
+		Log:     test_utils.Logger(),
+		Name:    "test_get_multiple_concurrent",
+		LoadOneFunc: func(ID int) (entry *string, err error) {
+			oneLoadCounter.Add(1)
+
+			// 10% of IDs do not exist
+			if ID%10 == 0 {
+				return nil, ErrNotFound
+			}
+
+			return test_utils.StringPointer("value_" + strconv.Itoa(ID)), nil
+		},
+		LoadMultipleFunc: func(IDs []int) (entries []LoadedEntry[int, string]) {
+			batchLoadCounter.Add(1)
+
+			for _, ID := range IDs {
+				// 10% of IDs do not exist - the loader omits them completely
+				if ID%10 == 0 {
+					continue
+				}
+
+				entries = append(entries, LoadedEntry[int, string]{
+					ID:    ID,
+					Value: test_utils.StringPointer("value_" + strconv.Itoa(ID)),
+				})
+			}
+			return
+		},
+		Timeouts: Timeouts{
+			TTL:            5 * time.Second,
+			NotFoundTTL:    200 * time.Millisecond,
+			ErrorTTL:       200 * time.Millisecond,
+			ReloadInterval: 1 * time.Millisecond, // entries expire immediately - force a lot of concurrent reloads
+			Randomizer:     0,
+		},
+		AutomaticReload: AutomaticReloadAllEntries,
+	})
+
+	assert.Nil(t, err)
+
+	routines := 20
+	iterations := 200
+	maxID := 50
+	batchSize := 10
+
+	wg := sync.WaitGroup{}
+
+	// batch readers over overlapping ID ranges
+	for i := 0; i < routines; i++ {
+		wg.Add(1)
+		go func(offset int) {
+			defer wg.Done()
+
+			for j := 0; j < iterations; j++ {
+				IDs := make([]int, 0, batchSize)
+				for k := 0; k < batchSize; k++ {
+					IDs = append(IDs, (offset+j+k)%maxID)
+				}
+				// make sure duplicates are in play as well
+				IDs = append(IDs, IDs[0])
+
+				values := c.GetMultiple(IDs)
+
+				for _, ID := range IDs {
+					value, found := values[ID]
+					if ID%10 == 0 {
+						assert.False(t, found, "ID %d must never be found", ID)
+						continue
+					}
+					if found {
+						assert.Equal(t, "value_"+strconv.Itoa(ID), *value)
+					}
+				}
+			}
+		}(i * 3)
+	}
+
+	// single readers over the very same IDs
+	for i := 0; i < routines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for j := 0; j < iterations; j++ {
+				ID := rand.Intn(maxID)
+
+				value := c.Get(ID)
+				if ID%10 == 0 {
+					assert.Nil(t, value)
+					continue
+				}
+				assert.Equal(t, "value_"+strconv.Itoa(ID), *value)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	t.Log("Batch loads:", batchLoadCounter.Load())
+	t.Log("Single loads:", oneLoadCounter.Load())
+}
+
+func TestGetMultipleEmpty(t *testing.T) {
+	t.Parallel()
+
+	spy := &batchLoaderSpy{}
+
+	c, err := New(Params[int, string]{
+		Context: context.Background(),
+		Log:     test_utils.Logger(),
+		Name:    "test_get_multiple_empty",
+		LoadOneFunc: func(ID int) (entry *string, err error) {
+			return test_utils.StringPointer("one_" + strconv.Itoa(ID)), nil
+		},
+		LoadMultipleFunc: func(IDs []int) (entries []LoadedEntry[int, string]) {
+			spy.record(IDs)
+			return
+		},
+		Timeouts:        cacheTestTimeouts,
+		AutomaticReload: AutomaticReloadDisabled,
+	})
+
+	assert.Nil(t, err)
+
+	values := c.GetMultiple(nil)
+	assert.NotNil(t, values)
+	assert.Equal(t, 0, len(values))
+
+	values = c.GetMultiple([]int{})
+	assert.NotNil(t, values)
+	assert.Equal(t, 0, len(values))
+
+	assert.Equal(t, 0, spy.callCount())
 }

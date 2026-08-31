@@ -7,6 +7,7 @@ It supports optional preloading via a channel, automatic background reload of ex
 Provided functions:
 
 -   **Get(ID)** — returns `*T` for key `K`. If the entry is in cache and valid, it returns it; if expired or missing, it loads via `LoadOneFunc` (and may store not-found or error for `NotFoundTTL`/`ErrorTTL`). Returns `nil` when the entry is not found (or on certain errors, depending on `LoadOneFunc`).
+-   **GetMultiple(IDs)** — returns `map[K]*T` for a batch of keys. Valid entries are served from cache, all the remaining IDs are loaded in a single `LoadMultipleFunc` call (or one by one via `Get` when `LoadMultipleFunc` is not set). Duplicate IDs are merged and keys missing in the result mean “not found”. See [Batch loading](#batch-loading).
 -   **GetCached(ID)** — returns `(value *T, exists bool)` from cache only; no lazy load or reload. `exists` is false if the key is missing or the entry has expired.
 -   **Remove(ID)** — deletes the entry from the cache and clears its TTL/reload watchers.
 -   **Invalidate(ID)** — marks the entry as expired; the next `Get` will reload it, or it will be reloaded by the automatic reload watcher (if enabled and, for `AutomaticReloadAccessedEntries`, if it was accessed).
@@ -35,7 +36,38 @@ A TTL watcher runs in the background and removes entries when their TTL has pass
 -   **Do not mutate item data after it is inserted into the cache.** The cache stores pointers to values; modifying the underlying data outside the cache (e.g. in `LoadOneFunc` return values, `ForceSet`, or `PreloadChan` entries) affects what all readers see and can cause races. Treat cached values as read-only.
 -   Cached data may not reflect the current state of the underlying storage.
 -   `ReloadInterval` must be ≤ `TTL`. TTL should be at least about 2× `ReloadInterval` for smoother behavior.
--   `LoadMultipleFunc` is stored in params and is optional; the cache itself does not call it. It is intended for use by your preload (or other) logic.
+-   `GetMultiple` does **not** do single-flight (see [Batch loading](#batch-loading)).
+
+## Batch loading
+
+`LoadMultipleFunc` is optional. When it is set, `GetMultiple` uses it to load everything that is missing or expired in one call; `Get` keeps using `LoadOneFunc`, so `LoadOneFunc` stays required even for caches that provide both.
+
+Two things are worth knowing before using it:
+
+-   **The loader does not have to return an entry for every requested ID.** IDs missing from its result are stored as not-found by the cache itself (for `NotFoundTTL`), so the next `GetMultiple` does not ask for them again. Without this, sparse batches would hit the storage on every call.
+-   **`GetMultiple` does not do single-flight.** Unlike `Get`, which serializes concurrent reloads of one key on that entry's mutex, two concurrent batches sharing an ID — or a batch running concurrently with `Get` of the same ID — load that entry more than once. Both loads store the same value, so the only cost is a redundant load. Preloading behaves the same way.
+
+Loaded entries go through the same path as preloaded ones, so `TTL`, `NotFoundTTL`, `ErrorTTL`, `Randomizer` and both watchers apply as usual. An entry that already exists in cache is not overwritten by a failed load (errors other than `ErrNotFound`).
+
+```go
+c, _ := lazy.New(lazy.Params[int, User]{
+	// ...
+	LoadOneFunc: func(id int) (*User, error) { return loadUser(id) },
+	LoadMultipleFunc: func(ids []int) (entries []lazy.LoadedEntry[int, User]) {
+		// one SELECT ... WHERE id IN (...) instead of len(ids) queries;
+		// rows that do not exist can simply be omitted
+		for _, user := range loadUsers(ids) {
+			entries = append(entries, lazy.LoadedEntry[int, User]{ID: user.ID, Value: user})
+		}
+		return
+	},
+})
+
+users := c.GetMultiple([]int{1, 2, 3})
+if user, ok := users[2]; ok {
+	// ...
+}
+```
 
 ## Timeouts
 
@@ -53,7 +85,7 @@ A TTL watcher runs in the background and removes entries when their TTL has pass
 -   **MetricsRegistry** — `*cadre_metrics.Registry`; if set, Prometheus metrics are registered. Optional.
 -   **Name** — Cache name used in logs and metrics. Required.
 -   **LoadOneFunc** — `func(ID K) (*T, error)`. Loads one entry. Return `ErrNotFound` for not found. Required.
--   **LoadMultipleFunc** — `func(IDs []K) []LoadedEntry[K, *T]`. Optional; for batch loading (e.g. in your preload). The cache does not call it.
+-   **LoadMultipleFunc** — `func(IDs []K) []LoadedEntry[K, T]`. Optional; used by `GetMultiple` to load a whole batch at once. See [Batch loading](#batch-loading).
 -   **Timeouts** — TTL, NotFoundTTL, ErrorTTL, ReloadInterval, Randomizer, MemsizeUpdate. Required; `ReloadInterval` ≤ `TTL`, `TTL` > 0.
 -   **PreloadChan** — `<-chan LoadedEntry[K,T]`. If non-nil, a goroutine consumes entries until the channel is closed. Optional.
 -   **AutomaticReload** — `AutomaticReloadDisabled`, `AutomaticReloadAccessedEntries`, or `AutomaticReloadAllEntries`.
@@ -69,7 +101,9 @@ When `MetricsRegistry` is set, these Prometheus metrics are registered (subsyste
 | `lazy_loads` | Counter | Loads triggered by `Get` (miss or expired) |
 | `force_sets` | Counter | `ForceSet` calls |
 | `error_loads` | Counter | Loads that failed with an error other than `ErrNotFound` |
-| `reads_count` | Counter | `Get` / `GetCached` calls |
+| `batch_loads` | Counter | `LoadMultipleFunc` calls (one per `GetMultiple` that had to load something) |
+| `batch_load_items` | Counter | IDs sent to `LoadMultipleFunc`; the ratio to `reads_count` is the batch hit rate |
+| `reads_count` | Counter | `Get` / `GetCached` calls, plus every ID passed to `GetMultiple` |
 | `received_nats_invalidations` | Counter | NATS invalidation messages received (if/when used) |
 | `memory_usage` | Gauge | Estimated size of entries in bytes (when `MemsizeUpdate` > 0) |
 
