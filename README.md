@@ -11,9 +11,8 @@ Provided functions:
 -   **GetCached(ID)** — returns `(value *T, exists bool)` from cache only; no lazy load or reload. `exists` is false if the key is missing or the entry has expired.
 -   **Remove(ID)** — deletes the entry from the cache and clears its TTL/reload watchers.
 -   **Invalidate(ID)** — marks the entry as expired; the next `Get` will reload it, or it will be reloaded by the automatic reload watcher (if enabled and, for `AutomaticReloadAccessedEntries`, if it was accessed).
--   **ForceSet(ID, value, err)** — sets the value (or not-found/error) in the cache directly, bypassing `LoadOneFunc`. Uses normal TTL and `ReloadInterval` for the entry.
 -   **Ready()** — blocks until preloading is done. If `PreloadChan` is nil, returns immediately.
--   **Lock() / Unlock()** — lock the cache mutex for exclusive access. While locked, `Get`, `GetCached`, `Remove`, `Invalidate`, and `ForceSet` block. Use for atomic multi-entry updates.
+-   **Lock() / Unlock()** — lock the cache mutex for exclusive access. While locked, `Get`, `GetMultiple`, `GetCached`, `Remove`, and `Invalidate` block. Use for atomic multi-entry updates.
 
 The cache uses Go generics: key type `K` must be `comparable`, value type `T` is arbitrary.
 
@@ -27,13 +26,13 @@ A TTL watcher runs in the background and removes entries when their TTL has pass
 
 ## AutomaticReload
 
--   **AutomaticReloadDisabled** — no background reload. Expired entries are reloaded only on `Get` or when explicitly set via `ForceSet`.
+-   **AutomaticReloadDisabled** — no background reload. Expired entries are reloaded only on `Get` or `GetMultiple`.
 -   **AutomaticReloadAccessedEntries** — only entries that have been accessed (via `Get`/`GetCached`) since their last reload are automatically reloaded when expired.
 -   **AutomaticReloadAllEntries** — all expired entries are automatically reloaded in the background.
 
 ## Caveats
 
--   **Do not mutate item data after it is inserted into the cache.** The cache stores pointers to values; modifying the underlying data outside the cache (e.g. in `LoadOneFunc` return values, `ForceSet`, or `PreloadChan` entries) affects what all readers see and can cause races. Treat cached values as read-only.
+-   **Do not mutate item data after it is inserted into the cache.** The cache stores pointers to values; modifying the underlying data outside the cache (e.g. in `LoadOneFunc` / `LoadMultipleFunc` return values, or `PreloadChan` entries) affects what all readers see and can cause races. Treat cached values as read-only.
 -   Cached data may not reflect the current state of the underlying storage.
 -   `ReloadInterval` must be ≤ `TTL`. TTL should be at least about 2× `ReloadInterval` for smoother behavior.
 -   `GetMultiple` does **not** do single-flight (see [Batch loading](#batch-loading)).
@@ -99,7 +98,6 @@ When `MetricsRegistry` is set, these Prometheus metrics are registered (subsyste
 | `items_count` | Gauge | Number of cached items |
 | `automatic_loads` | Counter | Automatic reloads (reload watcher) |
 | `lazy_loads` | Counter | Loads triggered by `Get` (miss or expired) |
-| `force_sets` | Counter | `ForceSet` calls |
 | `error_loads` | Counter | Loads that failed with an error other than `ErrNotFound` |
 | `batch_loads` | Counter | `LoadMultipleFunc` calls (one per `GetMultiple` that had to load something) |
 | `batch_load_items` | Counter | IDs sent to `LoadMultipleFunc`; the ratio to `reads_count` is the batch hit rate |

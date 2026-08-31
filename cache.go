@@ -363,50 +363,6 @@ func (c *Cache[K, T]) Invalidate(ID K) {
 	}
 }
 
-// ForceSet forcefully sets a value in the cache, overriding any existing entry.
-// This function bypasses the normal load mechanism and should only be used in
-// special cases where you need to directly manipulate cache contents.
-// The value will be cached with the normal TTL and ReloadInterval settings.
-func (c *Cache[K, T]) ForceSet(ID K, value *T, err error) {
-	c.mu.RLock()
-	entry, exists := c.data[ID]
-	c.mu.RUnlock()
-
-	if c.metrics != nil {
-		c.metrics.ForceSetCount.Inc()
-	}
-
-	nowMillis := time.Now().UnixMilli()
-
-	// update existing entry
-	if exists {
-		entry.mu.Lock()
-		ttl := entry.set(value, err, nowMillis, &c.timeouts, false)
-		entry.mu.Unlock()
-
-		c.setEntryWatchers(ID, ttl, entry, nowMillis)
-
-		return
-	}
-
-	// add new entry
-	entry = &cachedEntry[T]{}
-	entry.mu.Lock()
-
-	c.mu.Lock()
-	c.data[ID] = entry
-	c.mu.Unlock()
-
-	ttl := entry.set(value, err, nowMillis, &c.timeouts, true)
-	entry.mu.Unlock()
-
-	c.setEntryWatchers(ID, ttl, entry, nowMillis)
-
-	if c.metrics != nil {
-		c.metrics.ItemsCount.Inc()
-	}
-}
-
 func (c *Cache[K, T]) startPreloading(preloadChan <-chan LoadedEntry[K, T]) {
 	defer c.preloadWG.Done()
 
@@ -438,7 +394,7 @@ func (c *Cache[K, T]) Ready() {
 // The caller must call Unlock when done. This allows external code to
 // perform atomic operations on the cache data (modifying them).
 // During the lock all following functions will be blocked: Get,
-// GetCached, Remove, Invalidate, ForceSet.
+// GetMultiple, GetCached, Remove, Invalidate.
 func (c *Cache[K, T]) Lock() {
 	c.mu.Lock()
 }

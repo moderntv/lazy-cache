@@ -15,7 +15,6 @@ type Metrics struct {
 	ItemsCount                prometheus.Gauge
 	AutomaticLoadCount        prometheus.Counter
 	LazyLoadCount             prometheus.Counter
-	ForceSetCount             prometheus.Counter
 	ErrorLoadCount            prometheus.Counter
 	BatchLoadCount            prometheus.Counter
 	BatchLoadItemsCount       prometheus.Counter
@@ -46,13 +45,6 @@ func New(
 		Subsystem:   subSystem,
 		Name:        "lazy_loads",
 		Help:        "Total number of lazy item loads (triggered by user request)",
-		ConstLabels: prometheus.Labels{labelName: name},
-	})
-
-	forceSetCount := registry.NewCounter(prometheus.CounterOpts{
-		Subsystem:   subSystem,
-		Name:        "force_sets",
-		Help:        "Total number of force set operations (direct cache manipulation)",
 		ConstLabels: prometheus.Labels{labelName: name},
 	})
 
@@ -113,11 +105,6 @@ func New(
 		return
 	}
 
-	err = registry.Register(metricsPrefix+name+"_force_set_count", forceSetCount)
-	if err != nil {
-		return
-	}
-
 	err = registry.Register(metricsPrefix+name+"_error_load_count", errorLoadCount)
 	if err != nil {
 		return
@@ -152,7 +139,6 @@ func New(
 		ItemsCount:                itemsCount,
 		AutomaticLoadCount:        automaticLoadCount,
 		LazyLoadCount:             lazyLoadCount,
-		ForceSetCount:             forceSetCount,
 		ErrorLoadCount:            errorLoadCount,
 		BatchLoadCount:            batchLoadCount,
 		BatchLoadItemsCount:       batchLoadItemsCount,
