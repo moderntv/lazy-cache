@@ -112,7 +112,7 @@ func (c *Cache[K, T]) scheduleEntryLocked(entry *cachedEntry[K, T], ttl time.Dur
 		return
 	}
 
-	scheduledAt := time.Now().UnixMilli()
+	scheduledAt := c.now()
 
 	if ttl >= 0 {
 		entry.expiresAt = scheduledAt + ttl.Milliseconds()
@@ -204,7 +204,7 @@ func (c *Cache[K, T]) processDueEntries() time.Duration {
 
 		c.mu.Lock()
 
-		nowMillis := time.Now().UnixMilli()
+		nowMillis := c.now()
 		for ; processed < watcherBatchSize && len(c.schedule) > 0; processed++ {
 			entry := c.schedule[0]
 			if entry.deadline() > nowMillis {
@@ -312,7 +312,7 @@ func (c *Cache[K, T]) reloadEntry(entry *cachedEntry[K, T]) {
 
 	entry.mu.Lock()
 
-	nowMillis := time.Now().UnixMilli()
+	nowMillis := c.now()
 	invalidations := entry.invalidations.Load()
 	loadedValue, err := c.loadOneFunc(entry.id)
 	accessed := entry.accessed.Load()

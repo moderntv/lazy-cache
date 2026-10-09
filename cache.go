@@ -28,6 +28,7 @@ type Cache[K comparable, T any] struct {
 	loadOneFunc         LoadOneFunc[K, T]
 	loadMultipleFunc    LoadMultipleFunc[K, T]
 	automaticReloadType AutomaticReload
+	epoch               time.Time     // start of the cache time (see now)
 	watcherWake         chan struct{} // wakes the watcher up before its planned run
 	reloadWake          chan struct{} // notifies the reload worker about queued entries
 	// dynamic attributes (not using mutex)
@@ -37,7 +38,7 @@ type Cache[K comparable, T any] struct {
 	data          map[K]*cachedEntry[K, T]
 	schedule      entrySchedule[K, T]  // TTL evictions and automatic reloads of entries in data
 	reloadQueue   []*cachedEntry[K, T] // entries waiting for automatic reload
-	watcherWakeAt int64                // planned run of the watcher (timestamp in milliseconds)
+	watcherWakeAt int64                // planned run of the watcher (cache time in milliseconds)
 	// preloading synchronization
 	preloadWG *sync.WaitGroup
 }
@@ -67,6 +68,7 @@ func New[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
 		loadOneFunc:         params.LoadOneFunc,
 		loadMultipleFunc:    params.LoadMultipleFunc,
 		automaticReloadType: params.AutomaticReload,
+		epoch:               time.Now(),
 		watcherWake:         make(chan struct{}, 1),
 		reloadWake:          make(chan struct{}, 1),
 		data:                make(map[K]*cachedEntry[K, T]),
@@ -112,6 +114,13 @@ func New[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
 	return
 }
 
+// now returns the cache time in milliseconds. It is measured by the monotonic
+// clock since the cache was created, so unlike the wall clock it is not
+// affected by system time changes. All timestamps of entries use this time.
+func (c *Cache[K, T]) now() int64 {
+	return time.Since(c.epoch).Milliseconds()
+}
+
 func (c *Cache[K, T]) Get(ID K) *T {
 	c.mu.RLock()
 	entry, exists := c.data[ID]
@@ -121,7 +130,7 @@ func (c *Cache[K, T]) Get(ID K) *T {
 		c.metrics.ReadsCount.Inc()
 	}
 
-	nowMillis := time.Now().UnixMilli()
+	nowMillis := c.now()
 
 	// entry found in cache
 	if exists {
@@ -244,7 +253,7 @@ func (c *Cache[K, T]) GetMultiple(ids []K) (values map[K]*T) {
 		c.metrics.ReadsCount.Add(float64(len(ids)))
 	}
 
-	nowMillis := time.Now().UnixMilli()
+	nowMillis := c.now()
 
 	// serve what is valid in cache, collect the rest for the batch load
 	toLoad := make([]K, 0, len(uniqueIDs))
@@ -320,7 +329,7 @@ func (c *Cache[K, T]) GetCached(ID K) (value *T, exists bool) {
 	}
 
 	// check if entry is still valid (not expired)
-	nowMillis := time.Now().UnixMilli()
+	nowMillis := c.now()
 	if nowMillis >= entry.nextReload.Load() {
 		return nil, false
 	}
@@ -354,7 +363,7 @@ func (c *Cache[K, T]) Invalidate(ID K) {
 
 	if c.automaticReloadType != AutomaticReloadDisabled {
 		// reload in background as soon as possible
-		entry.reloadAt = time.Now().UnixMilli()
+		entry.reloadAt = c.now()
 		c.rescheduleLocked(entry)
 	}
 }
@@ -370,7 +379,7 @@ func (c *Cache[K, T]) startPreloading(preloadChan <-chan LoadedEntry[K, T]) {
 				return
 			}
 
-			c.addLoadedEntry(loadedEntry, time.Now().UnixMilli())
+			c.addLoadedEntry(loadedEntry, c.now())
 
 		case <-c.ctx.Done():
 			return
