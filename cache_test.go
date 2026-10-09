@@ -25,7 +25,7 @@ var cacheTestTimeouts = Timeouts{
 
 // cacheEntryOf reads an entry directly from the cache map. Tests must not touch
 // c.data without the lock - background watchers write into it concurrently.
-func cacheEntryOf[K comparable, T any](c *Cache[K, T], ID K) *cachedEntry[T] {
+func cacheEntryOf[K comparable, T any](c *Cache[K, T], ID K) *cachedEntry[K, T] {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -276,14 +276,14 @@ func testCacheEntryTTLProlong(t *testing.T) {
 func testCacheEntryAutomaticReloadAll(t *testing.T) {
 	t.Parallel()
 
-	loadCounter := 0
+	loadCounter := atomic.Int64{}
 
 	c, err := New(Params[int, string]{
 		Context: context.Background(),
 		Log:     test_utils.Logger(),
 		Name:    "test_cache1",
 		LoadOneFunc: func(ID int) (entry *string, err error) {
-			loadCounter++
+			loadCounter.Add(1)
 			return test_utils.StringPointer("value"), nil
 		},
 		Timeouts:        cacheTestTimeouts,
@@ -292,37 +292,37 @@ func testCacheEntryAutomaticReloadAll(t *testing.T) {
 
 	assert.Nil(t, err)
 
-	assert.Equal(t, 0, loadCounter)
+	assert.Equal(t, int64(0), loadCounter.Load())
 	_ = c.Get(0)
-	assert.Equal(t, 1, loadCounter)
+	assert.Equal(t, int64(1), loadCounter.Load())
 	time.Sleep(6500 * time.Millisecond)
 	// 6.5 s
-	assert.Equal(t, 3, loadCounter)
+	assert.Equal(t, int64(3), loadCounter.Load())
 	assert.Equal(t, 1, cacheSize(c))
 	time.Sleep(3 * time.Second)
 	// 9.5 s
-	assert.Equal(t, 4, loadCounter)
+	assert.Equal(t, int64(4), loadCounter.Load())
 	assert.Equal(t, 1, cacheSize(c))
 	time.Sleep(1 * time.Second)
 	// 10.5 s
-	assert.Equal(t, 4, loadCounter)
+	assert.Equal(t, int64(4), loadCounter.Load())
 	assert.Equal(t, 0, cacheSize(c))
 	time.Sleep(3 * time.Second)
 	// 13.5 s
-	assert.Equal(t, 4, loadCounter)
+	assert.Equal(t, int64(4), loadCounter.Load())
 }
 
 func testCacheEntryAutomaticReloadAccessed(t *testing.T) {
 	t.Parallel()
 
-	loadCounter := 0
+	loadCounter := atomic.Int64{}
 
 	c, err := New(Params[int, string]{
 		Context: context.Background(),
 		Log:     test_utils.Logger(),
 		Name:    "test_cache1",
 		LoadOneFunc: func(ID int) (entry *string, err error) {
-			loadCounter++
+			loadCounter.Add(1)
 			return test_utils.StringPointer("value"), nil
 		},
 		Timeouts:        cacheTestTimeouts,
@@ -335,30 +335,30 @@ func testCacheEntryAutomaticReloadAccessed(t *testing.T) {
 	_ = c.Get(0)
 	time.Sleep(6500 * time.Millisecond)
 	// 6.5 s (1x automatically reloaded)
-	assert.Equal(t, 2, loadCounter)
+	assert.Equal(t, int64(2), loadCounter.Load())
 	assert.Equal(t, 1, cacheSize(c))
 	_ = c.Get(0) // lazy reload at 6.5s
-	assert.Equal(t, 3, loadCounter)
+	assert.Equal(t, int64(3), loadCounter.Load())
 	time.Sleep(2 * time.Second)
 	// 8.5 s (2 seconds after lazy reload)
-	assert.Equal(t, 3, loadCounter)
+	assert.Equal(t, int64(3), loadCounter.Load())
 	assert.Equal(t, 1, cacheSize(c))
 	_ = c.Get(0)
-	assert.Equal(t, 3, loadCounter)
+	assert.Equal(t, int64(3), loadCounter.Load())
 	time.Sleep(2 * time.Second)
 	// 10.5 s (1x automatically reloaded at 9.5s)
-	assert.Equal(t, 4, loadCounter)
+	assert.Equal(t, int64(4), loadCounter.Load())
 	time.Sleep(2500 * time.Millisecond)
 	// 13s (no automatic reload)
-	assert.Equal(t, 4, loadCounter)
+	assert.Equal(t, int64(4), loadCounter.Load())
 	assert.Equal(t, 1, cacheSize(c))
 	time.Sleep(3 * time.Second)
 	// 16s (no ttl expiration yet)
-	assert.Equal(t, 4, loadCounter)
+	assert.Equal(t, int64(4), loadCounter.Load())
 	assert.Equal(t, 1, cacheSize(c))
 	time.Sleep(1 * time.Second)
 	// 17s (ttl expiration at 16.5s)
-	assert.Equal(t, 4, loadCounter)
+	assert.Equal(t, int64(4), loadCounter.Load())
 	assert.Equal(t, 0, cacheSize(c))
 }
 
@@ -594,6 +594,67 @@ func testCacheExpiredEntryDoubleCheck(t *testing.T) {
 
 	// Only 2 loads total (initial + one reload)
 	assert.Equal(t, int64(2), loadCounter.Load())
+}
+
+// TestInvalidateDuringLoad checks that Invalidate called while the entry is
+// being loaded by Get is not lost. The load could have read the data before
+// they changed, so the following Get has to load the entry again.
+func TestInvalidateDuringLoad(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		cachedBefore bool // entry is in cache (expired) before the blocked load
+	}{
+		"first_load": {cachedBefore: false},
+		"reload":     {cachedBefore: true},
+	}
+
+	for name, tc := range tests {
+		tc := tc // subtests run in parallel (go < 1.22 shares the loop variable)
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			version := atomic.Int64{} // version of data in the data storage
+			blockLoad := atomic.Bool{}
+			loadStarted := make(chan struct{})
+			loadRelease := make(chan struct{})
+
+			c, err := New(Params[int, string]{
+				Context: testContext(t),
+				Log:     test_utils.Logger(),
+				Name:    "test_invalidate_during_load",
+				LoadOneFunc: func(ID int) (*string, error) {
+					value := "value_" + strconv.FormatInt(version.Load(), 10)
+					if blockLoad.CompareAndSwap(true, false) {
+						close(loadStarted)
+						<-loadRelease
+					}
+					return &value, nil
+				},
+				Timeouts:        cacheTestTimeouts,
+				AutomaticReload: AutomaticReloadDisabled,
+			})
+			assert.Nil(t, err)
+
+			if tc.cachedBefore {
+				assert.Equal(t, "value_0", *c.Get(0))
+				c.Invalidate(0)
+			}
+
+			blockLoad.Store(true)
+			done := make(chan *string)
+			go func() { done <- c.Get(0) }()
+
+			// the data change while the load is in progress
+			<-loadStarted
+			version.Store(1)
+			c.Invalidate(0)
+			close(loadRelease)
+
+			assert.Equal(t, "value_0", *<-done)
+			assert.Equal(t, "value_1", *c.Get(0))
+		})
+	}
 }
 
 // batchLoaderSpy records what was requested from LoadMultipleFunc

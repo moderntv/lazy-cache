@@ -73,7 +73,7 @@ func TestEntrySetFirstTime(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			e := &cachedEntry[string]{}
+			e := newCachedEntry[int, string](0)
 
 			ttl := e.set(tc.loadedValue, tc.err, nowMillis, &entryTestTimeouts, true)
 			assert.Equal(t, tc.expectedTTL, ttl)
@@ -118,7 +118,7 @@ func TestEntryReloadAfterError(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			// entry was first loaded 500ms ago
-			e := &cachedEntry[string]{}
+			e := newCachedEntry[int, string](0)
 			e.set(test_utils.StringPointer("invalidValue"), errors.New("other error"), nowMillis-500, &entryTestTimeouts, true)
 			e.accessed.Store(true)
 
@@ -165,7 +165,7 @@ func TestEntryReloadAfterNotFound(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			// entry was first loaded 500ms ago
-			e := &cachedEntry[string]{}
+			e := newCachedEntry[int, string](0)
 			e.set(test_utils.StringPointer("invalidValue"), ErrNotFound, nowMillis-500, &entryTestTimeouts, true)
 			e.accessed.Store(true)
 
@@ -212,7 +212,7 @@ func TestEntryReloadAfterSuccess(t *testing.T) {
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
 			// entry was first loaded 500ms ago
-			e := &cachedEntry[string]{}
+			e := newCachedEntry[int, string](0)
 			e.set(test_utils.StringPointer("value0"), nil, nowMillis-500, &entryTestTimeouts, true)
 			e.accessed.Store(true)
 
@@ -237,7 +237,7 @@ func TestEntryRandomizedTTL(t *testing.T) {
 	lessThanReference := 0
 	greaterThanReference := 0
 
-	e := &cachedEntry[string]{}
+	e := newCachedEntry[int, string](0)
 
 	for i := 0; i < tries; i++ {
 		ttl := e.set(test_utils.StringPointer("value0"), nil, nowMillis, &randomizedTimeouts, false)
@@ -269,7 +269,7 @@ func TestEntryRandomizedNextReload(t *testing.T) {
 
 	referenceNextReload := nowMillis + entryTestTimeouts.ReloadInterval.Milliseconds()
 
-	e := &cachedEntry[string]{}
+	e := newCachedEntry[int, string](0)
 
 	for i := 0; i < tries; i++ {
 		_ = e.set(test_utils.StringPointer("value0"), nil, nowMillis, &randomizedTimeouts, false)
@@ -297,7 +297,7 @@ func TestEntryMutex(t *testing.T) {
 
 	wg := sync.WaitGroup{}
 
-	e := &cachedEntry[string]{}
+	e := newCachedEntry[int, string](0)
 	e.mu.Lock()
 
 	for i := 0; i < routines; i++ {
@@ -341,7 +341,7 @@ func BenchmarkAtomicWrite(b *testing.B) {
 }
 
 func BenchmarkEntryGet(b *testing.B) {
-	e := &cachedEntry[string]{}
+	e := newCachedEntry[int, string](0)
 	e.set(test_utils.StringPointer("invalidValue"), nil, 1500000000, &entryTestTimeouts, false)
 
 	for i := 0; i < b.N; i++ {
@@ -350,7 +350,7 @@ func BenchmarkEntryGet(b *testing.B) {
 }
 
 func BenchmarkEntrySetWithoutRandomizer(b *testing.B) {
-	e := &cachedEntry[string]{}
+	e := newCachedEntry[int, string](0)
 	value := test_utils.StringPointer("invalidValue")
 
 	for i := 0; i < b.N; i++ {
@@ -362,7 +362,7 @@ func BenchmarkEntrySetWithRandomizer(b *testing.B) {
 	randomizedTimeouts := entryTestTimeouts
 	randomizedTimeouts.Randomizer = 0.2
 
-	e := &cachedEntry[string]{}
+	e := newCachedEntry[int, string](0)
 	value := test_utils.StringPointer("invalidValue")
 
 	for i := 0; i < b.N; i++ {

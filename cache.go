@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/moderntv/deathrow"
 	"github.com/rs/zerolog"
 
 	"github.com/moderntv/lazy-cache/internal/memsize"
@@ -15,8 +14,6 @@ import (
 )
 
 const (
-	tllWatcherInterval                      = 100 * time.Millisecond
-	reloadWatcherInterval                   = 100 * time.Millisecond
 	automaticReloadIntervalFraction float64 = 0.9 // if automatic reload is enabled, the next reload is performed at 90% time of data expiration
 	minAutomaticReloadDuration              = 100 * time.Millisecond
 )
@@ -31,13 +28,17 @@ type Cache[K comparable, T any] struct {
 	loadOneFunc         LoadOneFunc[K, T]
 	loadMultipleFunc    LoadMultipleFunc[K, T]
 	automaticReloadType AutomaticReload
-	ttlWatcher          *deathrow.Prison[K]
-	reloadWatcher       *deathrow.Prison[K]
+	epoch               time.Time     // start of the cache time (see now)
+	watcherWake         chan struct{} // wakes the watcher up before its planned run
+	reloadWake          chan struct{} // notifies the reload worker about queued entries
 	// dynamic attributes (not using mutex)
 	memSizeValue atomic.Uint64
 	// attributes protected by mutex
-	mu   sync.RWMutex
-	data map[K]*cachedEntry[T]
+	mu            sync.RWMutex
+	data          map[K]*cachedEntry[K, T]
+	schedule      entrySchedule[K, T]  // TTL evictions and automatic reloads of entries in data
+	reloadQueue   []*cachedEntry[K, T] // entries waiting for automatic reload
+	watcherWakeAt int64                // planned run of the watcher (cache time in milliseconds)
 	// preloading synchronization
 	preloadWG *sync.WaitGroup
 }
@@ -67,9 +68,11 @@ func New[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
 		loadOneFunc:         params.LoadOneFunc,
 		loadMultipleFunc:    params.LoadMultipleFunc,
 		automaticReloadType: params.AutomaticReload,
-		ttlWatcher:          deathrow.NewPrison[K](),
-		reloadWatcher:       deathrow.NewPrison[K](),
-		data:                make(map[K]*cachedEntry[T]),
+		epoch:               time.Now(),
+		watcherWake:         make(chan struct{}, 1),
+		reloadWake:          make(chan struct{}, 1),
+		data:                make(map[K]*cachedEntry[K, T]),
+		watcherWakeAt:       noDeadline,
 	}
 
 	if params.PreloadChan != nil {
@@ -80,7 +83,7 @@ func New[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
 		c.log.Debug().Msg("preloading disabled")
 	}
 
-	go c.startTTLWatcher()
+	go c.startWatcher()
 
 	if c.automaticReloadType != AutomaticReloadDisabled {
 		realMinReloadInterval := time.Duration(
@@ -95,7 +98,7 @@ func New[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
 				Msg("combination of automatic reload interval is too short, setting to minimum default value")
 		}
 
-		go c.startReloadWatcher()
+		go c.startReloadWorker()
 
 	} else {
 		c.log.Debug().Msg("automatic reload disabled")
@@ -111,6 +114,13 @@ func New[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
 	return
 }
 
+// now returns the cache time in milliseconds. It is measured by the monotonic
+// clock since the cache was created, so unlike the wall clock it is not
+// affected by system time changes. All timestamps of entries use this time.
+func (c *Cache[K, T]) now() int64 {
+	return time.Since(c.epoch).Milliseconds()
+}
+
 func (c *Cache[K, T]) Get(ID K) *T {
 	c.mu.RLock()
 	entry, exists := c.data[ID]
@@ -120,7 +130,7 @@ func (c *Cache[K, T]) Get(ID K) *T {
 		c.metrics.ReadsCount.Inc()
 	}
 
-	nowMillis := time.Now().UnixMilli()
+	nowMillis := c.now()
 
 	// entry found in cache
 	if exists {
@@ -140,13 +150,14 @@ func (c *Cache[K, T]) Get(ID K) *T {
 		}
 
 		// reload entry
+		invalidations := entry.invalidations.Load()
 		loadedValue, err := c.loadOneFunc(ID)
 		ttl := entry.set(loadedValue, err, nowMillis, &c.timeouts, false)
+		entry.expireIfInvalidated(invalidations)
 
 		entry.mu.Unlock()
 
-		// update watchers
-		c.setEntryWatchers(ID, ttl, entry, nowMillis)
+		c.scheduleEntry(entry, ttl, nowMillis)
 
 		if c.metrics != nil {
 			c.metrics.LazyLoadCount.Inc()
@@ -159,32 +170,32 @@ func (c *Cache[K, T]) Get(ID K) *T {
 	}
 
 	// not found in cache
-	entry = &cachedEntry[T]{}
+	entry = newCachedEntry[K, T](ID)
 	entry.mu.Lock()
 
 	c.mu.Lock()
-	c.data[ID] = entry
+	c.storeEntryLocked(entry)
 	c.mu.Unlock()
 
+	invalidations := entry.invalidations.Load()
 	loadedValue, err := c.loadOneFunc(ID)
 	ttl := entry.set(loadedValue, err, nowMillis, &c.timeouts, true)
+	entry.expireIfInvalidated(invalidations)
 
 	entry.mu.Unlock()
 
 	// do not store into cache when TTL is 0
 	if ttl == 0 {
 		c.mu.Lock()
-		delete(c.data, ID)
+		c.deleteEntryLocked(entry)
 		c.mu.Unlock()
 
 		return entry.value.Load()
 	}
 
-	// update watchers
-	c.setEntryWatchers(ID, ttl, entry, nowMillis)
+	c.scheduleEntry(entry, ttl, nowMillis)
 
 	if c.metrics != nil {
-		c.metrics.ItemsCount.Inc()
 		c.metrics.LazyLoadCount.Inc()
 		if err != nil && !errors.Is(err, ErrNotFound) {
 			c.metrics.ErrorLoadCount.Inc()
@@ -242,7 +253,7 @@ func (c *Cache[K, T]) GetMultiple(ids []K) (values map[K]*T) {
 		c.metrics.ReadsCount.Add(float64(len(ids)))
 	}
 
-	nowMillis := time.Now().UnixMilli()
+	nowMillis := c.now()
 
 	// serve what is valid in cache, collect the rest for the batch load
 	toLoad := make([]K, 0, len(uniqueIDs))
@@ -318,7 +329,7 @@ func (c *Cache[K, T]) GetCached(ID K) (value *T, exists bool) {
 	}
 
 	// check if entry is still valid (not expired)
-	nowMillis := time.Now().UnixMilli()
+	nowMillis := c.now()
 	if nowMillis >= entry.nextReload.Load() {
 		return nil, false
 	}
@@ -328,38 +339,32 @@ func (c *Cache[K, T]) GetCached(ID K) (value *T, exists bool) {
 
 func (c *Cache[K, T]) Remove(ID K) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	_, exists := c.data[ID]
-	if !exists {
-		c.mu.Unlock()
-		return
-	}
-	delete(c.data, ID)
-
-	c.mu.Unlock()
-
-	// remove watchers
-	c.ttlWatcher.Drop(ID)
-	c.reloadWatcher.Drop(ID)
-
-	if c.metrics != nil {
-		c.metrics.ItemsCount.Dec()
+	entry, exists := c.data[ID]
+	if exists {
+		c.deleteEntryLocked(entry)
 	}
 }
 
 func (c *Cache[K, T]) Invalidate(ID K) {
-	c.mu.RLock()
-	entry, exists := c.data[ID]
-	c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
+	entry, exists := c.data[ID]
 	if !exists {
 		return
 	}
 
+	// the counter has to be incremented before the entry is expired (see
+	// cachedEntry.expireIfInvalidated)
+	entry.invalidations.Add(1)
 	entry.nextReload.Store(0)
 
 	if c.automaticReloadType != AutomaticReloadDisabled {
-		c.reloadWatcher.Push(ID, 0)
+		// reload in background as soon as possible
+		entry.reloadAt = c.now()
+		c.rescheduleLocked(entry)
 	}
 }
 
@@ -374,7 +379,7 @@ func (c *Cache[K, T]) startPreloading(preloadChan <-chan LoadedEntry[K, T]) {
 				return
 			}
 
-			c.addLoadedEntry(loadedEntry, time.Now().UnixMilli())
+			c.addLoadedEntry(loadedEntry, c.now())
 
 		case <-c.ctx.Done():
 			return
@@ -407,10 +412,8 @@ func (c *Cache[K, T]) Unlock() {
 
 // addLoadedEntry adds already loaded entry to cache (if it makes sense)
 func (c *Cache[K, T]) addLoadedEntry(loadedEntry LoadedEntry[K, T], nowMillis int64) {
-	entry := &cachedEntry[T]{}
+	entry := newCachedEntry[K, T](loadedEntry.ID)
 	ttl := entry.set(loadedEntry.Value, loadedEntry.Err, nowMillis, &c.timeouts, true)
-
-	id := loadedEntry.ID
 
 	loadFailed := loadedEntry.Err != nil && !errors.Is(loadedEntry.Err, ErrNotFound)
 	if c.metrics != nil && loadFailed {
@@ -418,133 +421,16 @@ func (c *Cache[K, T]) addLoadedEntry(loadedEntry LoadedEntry[K, T], nowMillis in
 	}
 
 	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	_, exists := c.data[id]
+	_, exists := c.data[entry.id]
 	// do not override existing entry in case of error (except NotFound)
 	if exists && loadFailed {
-		c.mu.Unlock()
-
 		return
 	}
 
-	c.data[id] = entry
-
-	c.mu.Unlock()
-
-	// update TTL watcher
-	c.setEntryWatchers(id, ttl, entry, nowMillis)
-
-	if c.metrics != nil {
-		if !exists {
-			c.metrics.ItemsCount.Inc()
-		}
-	}
-}
-
-func (c *Cache[K, T]) startTTLWatcher() {
-	ch := c.ttlWatcher.PopperWithResolution(c.ctx, tllWatcherInterval)
-
-	// read data from TTL watcher and remove expired entries from cache
-	// channel is closed when context is done
-	for {
-		item, more := <-ch
-		if !more {
-			break
-		}
-
-		ID := item.ID()
-
-		c.mu.Lock()
-
-		_, exists := c.data[ID]
-		if !exists {
-			c.mu.Unlock()
-			continue
-		}
-
-		delete(c.data, ID)
-
-		c.mu.Unlock()
-
-		// remove from TTL watcher
-		c.reloadWatcher.Drop(ID)
-
-		if c.metrics != nil {
-			c.metrics.ItemsCount.Dec()
-		}
-	}
-}
-
-func (c *Cache[K, T]) startReloadWatcher() {
-	ch := c.reloadWatcher.PopperWithResolution(c.ctx, reloadWatcherInterval)
-
-	// read data from reload watcher and reload expired entries
-	// channel is closed when context is done
-	for {
-		item, more := <-ch
-		if !more {
-			break
-		}
-
-		id := item.ID()
-
-		c.mu.Lock()
-		entry, exists := c.data[id]
-		c.mu.Unlock()
-
-		if !exists {
-			continue
-		}
-
-		// prevent unnecessary reloads of entries that are not used
-		// if entry is later accessed, it is lazy-reloaded
-		if c.automaticReloadType == AutomaticReloadAccessedEntries && !entry.accessed.Load() {
-			continue
-		}
-
-		entry.mu.Lock()
-
-		nowMillis := time.Now().UnixMilli()
-		loadedValue, err := c.loadOneFunc(id)
-		accessed := entry.accessed.Load()
-		ttl := entry.set(loadedValue, err, nowMillis, &c.timeouts, false)
-		if !accessed {
-			ttl = -1 // do not prolong TTL for not accessed entries
-		}
-
-		entry.mu.Unlock()
-
-		// update watchers
-		c.setEntryWatchers(id, ttl, entry, nowMillis)
-
-		if c.metrics != nil {
-			c.metrics.AutomaticLoadCount.Inc()
-			if err != nil && !errors.Is(err, ErrNotFound) {
-				c.metrics.ErrorLoadCount.Inc()
-			}
-		}
-	}
-}
-
-func (c *Cache[K, T]) setEntryWatchers(
-	entryID K,
-	ttl time.Duration,
-	entry *cachedEntry[T],
-	nowMillis int64,
-) {
-	if ttl >= 0 {
-		c.ttlWatcher.Push(entryID, ttl)
-	}
-
-	if c.automaticReloadType == AutomaticReloadDisabled {
-		return
-	}
-
-	nextAutomaticReloadDuration := time.Duration(float64(entry.nextReload.Load()-nowMillis)*automaticReloadIntervalFraction) * time.Millisecond
-	if nextAutomaticReloadDuration < minAutomaticReloadDuration {
-		nextAutomaticReloadDuration = minAutomaticReloadDuration
-	}
-	c.reloadWatcher.Push(entryID, nextAutomaticReloadDuration)
+	c.storeEntryLocked(entry)
+	c.scheduleEntryLocked(entry, ttl, nowMillis)
 }
 
 func (c *Cache[K, T]) startMemoryMeassurement(interval time.Duration) {
@@ -575,7 +461,7 @@ func (c *Cache[K, T]) updateMemsize() {
 
 	// get list of entries using read lock
 	c.mu.RLock()
-	entries := make([]*cachedEntry[T], 0, len(c.data))
+	entries := make([]*cachedEntry[K, T], 0, len(c.data))
 	for id := range c.data {
 		entries = append(entries, c.data[id])
 	}
