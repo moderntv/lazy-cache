@@ -25,7 +25,7 @@ var cacheTestTimeouts = Timeouts{
 
 // cacheEntryOf reads an entry directly from the cache map. Tests must not touch
 // c.data without the lock - background watchers write into it concurrently.
-func cacheEntryOf[K comparable, T any](c *Cache[K, T], ID K) *cachedEntry[T] {
+func cacheEntryOf[K comparable, T any](c *Cache[K, T], ID K) *cachedEntry[K, T] {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 

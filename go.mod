@@ -6,7 +6,6 @@ toolchain go1.22.0
 
 require (
 	github.com/moderntv/cadre v0.4.6
-	github.com/moderntv/deathrow v0.2.0
 	github.com/nats-io/nats-server/v2 v2.10.20
 	github.com/nats-io/nats.go v1.37.0
 	github.com/prometheus/client_golang v1.14.1-0.20221122130035-8b6e68085b10

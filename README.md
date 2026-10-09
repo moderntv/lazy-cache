@@ -9,8 +9,8 @@ Provided functions:
 -   **Get(ID)** — returns `*T` for key `K`. If the entry is in cache and valid, it returns it; if expired or missing, it loads via `LoadOneFunc` (and may store not-found or error for `NotFoundTTL`/`ErrorTTL`). Returns `nil` when the entry is not found (or on certain errors, depending on `LoadOneFunc`).
 -   **GetMultiple(IDs)** — returns `map[K]*T` for a batch of keys. Valid entries are served from cache, all the remaining IDs are loaded in a single `LoadMultipleFunc` call (or one by one via `Get` when `LoadMultipleFunc` is not set). Duplicate IDs are merged and keys missing in the result mean “not found”. See [Batch loading](#batch-loading).
 -   **GetCached(ID)** — returns `(value *T, exists bool)` from cache only; no lazy load or reload. `exists` is false if the key is missing or the entry has expired.
--   **Remove(ID)** — deletes the entry from the cache and clears its TTL/reload watchers.
--   **Invalidate(ID)** — marks the entry as expired; the next `Get` will reload it, or it will be reloaded by the automatic reload watcher (if enabled and, for `AutomaticReloadAccessedEntries`, if it was accessed).
+-   **Remove(ID)** — deletes the entry from the cache together with its scheduled TTL eviction and automatic reload.
+-   **Invalidate(ID)** — marks the entry as expired; the next `Get` will reload it, or it is reloaded in the background right away (if automatic reload is enabled and, for `AutomaticReloadAccessedEntries`, if it was accessed).
 -   **Ready()** — blocks until preloading is done. If `PreloadChan` is nil, returns immediately.
 -   **Lock() / Unlock()** — lock the cache mutex for exclusive access. While locked, `Get`, `GetMultiple`, `GetCached`, `Remove`, and `Invalidate` block. Use for atomic multi-entry updates.
 
@@ -20,7 +20,7 @@ The cache uses Go generics: key type `K` must be `comparable`, value type `T` is
 
 `New(...)` does not perform an initial full load. With `PreloadChan != nil`, a goroutine consumes `LoadedEntry[K,T]` from the channel and adds them to the cache; preloading ends when the channel is closed. `Ready()` blocks until that goroutine exits. With `PreloadChan == nil`, preloading is disabled and `Ready()` returns immediately.
 
-A TTL watcher runs in the background and removes entries when their TTL has passed. If `AutomaticReload` is not `AutomaticReloadDisabled`, a reload watcher runs and reloads expired entries (respecting `AutomaticReloadAccessedEntries` vs `AutomaticReloadAllEntries`). If `Timeouts.MemsizeUpdate > 0` and `MetricsRegistry` is set, memory usage is periodically recalculated.
+A watcher runs in the background. It keeps entries in a single min-heap ordered by their nearest deadline (TTL eviction or automatic reload), removes entries whose TTL has passed and, if `AutomaticReload` is not `AutomaticReloadDisabled`, hands entries due for reload over to a reload worker (respecting `AutomaticReloadAccessedEntries` vs `AutomaticReloadAllEntries`). Reloads run one by one in the worker, so slow loads do not delay evictions. The watcher sleeps until the nearest deadline, keeping at least 100 ms between runs so that events due close together are handled at once; it is woken up earlier only when an entry needs to be handled sooner (e.g. after `Invalidate`). Expired entries are evicted in batches, so a mass expiration does not block the cache for long. If `Timeouts.MemsizeUpdate > 0` and `MetricsRegistry` is set, memory usage is periodically recalculated.
 
 `LoadOneFunc` can return `lazy.ErrNotFound` to indicate “not found”; the entry is then cached for `NotFoundTTL` (or not stored if `NotFoundTTL == 0`). Other errors can be cached for `ErrorTTL` on the first load (or not stored if `ErrorTTL == 0`).
 
@@ -46,7 +46,7 @@ Two things are worth knowing before using it:
 -   **The loader does not have to return an entry for every requested ID.** IDs missing from its result are stored as not-found by the cache itself (for `NotFoundTTL`), so the next `GetMultiple` does not ask for them again. Without this, sparse batches would hit the storage on every call.
 -   **`GetMultiple` does not do single-flight.** Unlike `Get`, which serializes concurrent reloads of one key on that entry's mutex, two concurrent batches sharing an ID — or a batch running concurrently with `Get` of the same ID — load that entry more than once. Both loads store the same value, so the only cost is a redundant load. Preloading behaves the same way.
 
-Loaded entries go through the same path as preloaded ones, so `TTL`, `NotFoundTTL`, `ErrorTTL`, `Randomizer` and both watchers apply as usual. An entry that already exists in cache is not overwritten by a failed load (errors other than `ErrNotFound`).
+Loaded entries go through the same path as preloaded ones, so `TTL`, `NotFoundTTL`, `ErrorTTL`, `Randomizer`, TTL eviction and automatic reload apply as usual. An entry that already exists in cache is not overwritten by a failed load (errors other than `ErrNotFound`).
 
 ```go
 c, _ := lazy.New(lazy.Params[int, User]{
@@ -96,7 +96,7 @@ When `MetricsRegistry` is set, these Prometheus metrics are registered (subsyste
 | Metric | Type | Description |
 |--------|------|-------------|
 | `items_count` | Gauge | Number of cached items |
-| `automatic_loads` | Counter | Automatic reloads (reload watcher) |
+| `automatic_loads` | Counter | Automatic reloads (reload worker) |
 | `lazy_loads` | Counter | Loads triggered by `Get` (miss or expired) |
 | `error_loads` | Counter | Loads that failed with an error other than `ErrNotFound` |
 | `batch_loads` | Counter | `LoadMultipleFunc` calls (one per `GetMultiple` that had to load something) |
