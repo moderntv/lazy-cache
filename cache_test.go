@@ -276,14 +276,14 @@ func testCacheEntryTTLProlong(t *testing.T) {
 func testCacheEntryAutomaticReloadAll(t *testing.T) {
 	t.Parallel()
 
-	loadCounter := 0
+	loadCounter := atomic.Int64{}
 
 	c, err := New(Params[int, string]{
 		Context: context.Background(),
 		Log:     test_utils.Logger(),
 		Name:    "test_cache1",
 		LoadOneFunc: func(ID int) (entry *string, err error) {
-			loadCounter++
+			loadCounter.Add(1)
 			return test_utils.StringPointer("value"), nil
 		},
 		Timeouts:        cacheTestTimeouts,
@@ -292,37 +292,37 @@ func testCacheEntryAutomaticReloadAll(t *testing.T) {
 
 	assert.Nil(t, err)
 
-	assert.Equal(t, 0, loadCounter)
+	assert.Equal(t, int64(0), loadCounter.Load())
 	_ = c.Get(0)
-	assert.Equal(t, 1, loadCounter)
+	assert.Equal(t, int64(1), loadCounter.Load())
 	time.Sleep(6500 * time.Millisecond)
 	// 6.5 s
-	assert.Equal(t, 3, loadCounter)
+	assert.Equal(t, int64(3), loadCounter.Load())
 	assert.Equal(t, 1, cacheSize(c))
 	time.Sleep(3 * time.Second)
 	// 9.5 s
-	assert.Equal(t, 4, loadCounter)
+	assert.Equal(t, int64(4), loadCounter.Load())
 	assert.Equal(t, 1, cacheSize(c))
 	time.Sleep(1 * time.Second)
 	// 10.5 s
-	assert.Equal(t, 4, loadCounter)
+	assert.Equal(t, int64(4), loadCounter.Load())
 	assert.Equal(t, 0, cacheSize(c))
 	time.Sleep(3 * time.Second)
 	// 13.5 s
-	assert.Equal(t, 4, loadCounter)
+	assert.Equal(t, int64(4), loadCounter.Load())
 }
 
 func testCacheEntryAutomaticReloadAccessed(t *testing.T) {
 	t.Parallel()
 
-	loadCounter := 0
+	loadCounter := atomic.Int64{}
 
 	c, err := New(Params[int, string]{
 		Context: context.Background(),
 		Log:     test_utils.Logger(),
 		Name:    "test_cache1",
 		LoadOneFunc: func(ID int) (entry *string, err error) {
-			loadCounter++
+			loadCounter.Add(1)
 			return test_utils.StringPointer("value"), nil
 		},
 		Timeouts:        cacheTestTimeouts,
@@ -335,30 +335,30 @@ func testCacheEntryAutomaticReloadAccessed(t *testing.T) {
 	_ = c.Get(0)
 	time.Sleep(6500 * time.Millisecond)
 	// 6.5 s (1x automatically reloaded)
-	assert.Equal(t, 2, loadCounter)
+	assert.Equal(t, int64(2), loadCounter.Load())
 	assert.Equal(t, 1, cacheSize(c))
 	_ = c.Get(0) // lazy reload at 6.5s
-	assert.Equal(t, 3, loadCounter)
+	assert.Equal(t, int64(3), loadCounter.Load())
 	time.Sleep(2 * time.Second)
 	// 8.5 s (2 seconds after lazy reload)
-	assert.Equal(t, 3, loadCounter)
+	assert.Equal(t, int64(3), loadCounter.Load())
 	assert.Equal(t, 1, cacheSize(c))
 	_ = c.Get(0)
-	assert.Equal(t, 3, loadCounter)
+	assert.Equal(t, int64(3), loadCounter.Load())
 	time.Sleep(2 * time.Second)
 	// 10.5 s (1x automatically reloaded at 9.5s)
-	assert.Equal(t, 4, loadCounter)
+	assert.Equal(t, int64(4), loadCounter.Load())
 	time.Sleep(2500 * time.Millisecond)
 	// 13s (no automatic reload)
-	assert.Equal(t, 4, loadCounter)
+	assert.Equal(t, int64(4), loadCounter.Load())
 	assert.Equal(t, 1, cacheSize(c))
 	time.Sleep(3 * time.Second)
 	// 16s (no ttl expiration yet)
-	assert.Equal(t, 4, loadCounter)
+	assert.Equal(t, int64(4), loadCounter.Load())
 	assert.Equal(t, 1, cacheSize(c))
 	time.Sleep(1 * time.Second)
 	// 17s (ttl expiration at 16.5s)
-	assert.Equal(t, 4, loadCounter)
+	assert.Equal(t, int64(4), loadCounter.Load())
 	assert.Equal(t, 0, cacheSize(c))
 }
 
