@@ -10,10 +10,11 @@ import (
 )
 
 type cachedEntry[K comparable, T any] struct {
-	nextReload atomic.Int64      // timestamp of next reload in milliseconds
-	accessed   atomic.Bool       // true if entry data was accessed since last (re)load
-	value      atomic.Pointer[T] // nil when not found
-	mu         sync.Mutex
+	nextReload    atomic.Int64      // timestamp of next reload in milliseconds
+	accessed      atomic.Bool       // true if entry data was accessed since last (re)load
+	value         atomic.Pointer[T] // nil when not found
+	invalidations atomic.Uint64     // number of Invalidate calls (detects invalidation during load)
+	mu            sync.Mutex
 
 	// scheduling of TTL eviction and automatic reload (protected by Cache.mu)
 	id        K
@@ -75,6 +76,17 @@ end:
 	e.nextReload.Store(nowMillis + utils.RandomizeDuration(timeouts.ReloadInterval, timeouts.Randomizer).Milliseconds())
 
 	return
+}
+
+// expireIfInvalidated expires the entry again when it was invalidated since
+// `invalidations` were read before the load - the loaded data may be outdated.
+// Invalidate increments the counter before it expires the entry, so the
+// invalidation is either detected here or Invalidate expires the entry after
+// it has been set.
+func (e *cachedEntry[K, T]) expireIfInvalidated(invalidations uint64) {
+	if e.invalidations.Load() != invalidations {
+		e.nextReload.Store(0)
+	}
 }
 
 func (e *cachedEntry[K, T]) get() *T {

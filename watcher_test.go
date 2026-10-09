@@ -221,6 +221,51 @@ func TestWatcherInvalidateReloadsImmediately(t *testing.T) {
 	assertScheduleConsistent(t, c, true)
 }
 
+// TestWatcherInvalidateDuringReload checks that Invalidate called while the
+// entry is being reloaded in background is not lost. The reload could have
+// read the data before they changed, so the entry has to be reloaded again.
+func TestWatcherInvalidateDuringReload(t *testing.T) {
+	t.Parallel()
+
+	version := atomic.Int64{} // version of data in the data storage
+	loadCounter := atomic.Int64{}
+	reloadStarted := make(chan struct{})
+	reloadRelease := make(chan struct{})
+
+	c, err := New(Params[int, string]{
+		Context: testContext(t),
+		Log:     test_utils.Logger(),
+		Name:    "test_watcher_invalidate_during_reload",
+		LoadOneFunc: func(ID int) (*string, error) {
+			value := "value_" + strconv.FormatInt(version.Load(), 10)
+			// only the first automatic reload is blocked
+			if loadCounter.Add(1) == 2 {
+				close(reloadStarted)
+				<-reloadRelease
+			}
+			return &value, nil
+		},
+		Timeouts:        cacheTestTimeouts,
+		AutomaticReload: AutomaticReloadAllEntries,
+	})
+	assert.Nil(t, err)
+
+	assert.Equal(t, "value_0", *c.Get(0))
+
+	// the data change while the automatic reload is in progress
+	c.Invalidate(0)
+	<-reloadStarted
+	version.Store(1)
+	c.Invalidate(0)
+	close(reloadRelease)
+
+	assert.Eventually(t, func() bool {
+		value, exists := c.GetCached(0)
+		return exists && *value == "value_1"
+	}, time.Second, time.Millisecond)
+	assertScheduleConsistent(t, c, true)
+}
+
 // TestWatcherEntryRemovedDuringLoad checks that an entry removed while being
 // loaded is not scheduled afterwards (it would evict its successor otherwise).
 func TestWatcherEntryRemovedDuringLoad(t *testing.T) {

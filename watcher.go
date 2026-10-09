@@ -313,9 +313,11 @@ func (c *Cache[K, T]) reloadEntry(entry *cachedEntry[K, T]) {
 	entry.mu.Lock()
 
 	nowMillis := time.Now().UnixMilli()
+	invalidations := entry.invalidations.Load()
 	loadedValue, err := c.loadOneFunc(entry.id)
 	accessed := entry.accessed.Load()
 	ttl := entry.set(loadedValue, err, nowMillis, &c.timeouts, false)
+	entry.expireIfInvalidated(invalidations)
 	if !accessed {
 		ttl = -1 // do not prolong TTL for not accessed entries
 	}

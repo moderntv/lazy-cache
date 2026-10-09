@@ -141,8 +141,10 @@ func (c *Cache[K, T]) Get(ID K) *T {
 		}
 
 		// reload entry
+		invalidations := entry.invalidations.Load()
 		loadedValue, err := c.loadOneFunc(ID)
 		ttl := entry.set(loadedValue, err, nowMillis, &c.timeouts, false)
+		entry.expireIfInvalidated(invalidations)
 
 		entry.mu.Unlock()
 
@@ -166,8 +168,10 @@ func (c *Cache[K, T]) Get(ID K) *T {
 	c.storeEntryLocked(entry)
 	c.mu.Unlock()
 
+	invalidations := entry.invalidations.Load()
 	loadedValue, err := c.loadOneFunc(ID)
 	ttl := entry.set(loadedValue, err, nowMillis, &c.timeouts, true)
+	entry.expireIfInvalidated(invalidations)
 
 	entry.mu.Unlock()
 
@@ -343,6 +347,9 @@ func (c *Cache[K, T]) Invalidate(ID K) {
 		return
 	}
 
+	// the counter has to be incremented before the entry is expired (see
+	// cachedEntry.expireIfInvalidated)
+	entry.invalidations.Add(1)
 	entry.nextReload.Store(0)
 
 	if c.automaticReloadType != AutomaticReloadDisabled {

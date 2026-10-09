@@ -596,6 +596,67 @@ func testCacheExpiredEntryDoubleCheck(t *testing.T) {
 	assert.Equal(t, int64(2), loadCounter.Load())
 }
 
+// TestInvalidateDuringLoad checks that Invalidate called while the entry is
+// being loaded by Get is not lost. The load could have read the data before
+// they changed, so the following Get has to load the entry again.
+func TestInvalidateDuringLoad(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		cachedBefore bool // entry is in cache (expired) before the blocked load
+	}{
+		"first_load": {cachedBefore: false},
+		"reload":     {cachedBefore: true},
+	}
+
+	for name, tc := range tests {
+		tc := tc // subtests run in parallel (go < 1.22 shares the loop variable)
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			version := atomic.Int64{} // version of data in the data storage
+			blockLoad := atomic.Bool{}
+			loadStarted := make(chan struct{})
+			loadRelease := make(chan struct{})
+
+			c, err := New(Params[int, string]{
+				Context: testContext(t),
+				Log:     test_utils.Logger(),
+				Name:    "test_invalidate_during_load",
+				LoadOneFunc: func(ID int) (*string, error) {
+					value := "value_" + strconv.FormatInt(version.Load(), 10)
+					if blockLoad.CompareAndSwap(true, false) {
+						close(loadStarted)
+						<-loadRelease
+					}
+					return &value, nil
+				},
+				Timeouts:        cacheTestTimeouts,
+				AutomaticReload: AutomaticReloadDisabled,
+			})
+			assert.Nil(t, err)
+
+			if tc.cachedBefore {
+				assert.Equal(t, "value_0", *c.Get(0))
+				c.Invalidate(0)
+			}
+
+			blockLoad.Store(true)
+			done := make(chan *string)
+			go func() { done <- c.Get(0) }()
+
+			// the data change while the load is in progress
+			<-loadStarted
+			version.Store(1)
+			c.Invalidate(0)
+			close(loadRelease)
+
+			assert.Equal(t, "value_0", *<-done)
+			assert.Equal(t, "value_1", *c.Get(0))
+		})
+	}
+}
+
 // batchLoaderSpy records what was requested from LoadMultipleFunc
 type batchLoaderSpy struct {
 	mu       sync.Mutex
