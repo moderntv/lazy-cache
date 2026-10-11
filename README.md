@@ -7,6 +7,7 @@ It supports optional preloading via a channel, automatic background reload of ex
 Provided functions:
 
 -   **Get(ID)** — returns `*T` for key `K`. If the entry is in cache and valid, it returns it; if expired or missing, it loads via `LoadOneFunc` (and may store not-found or error for `NotFoundTTL`/`ErrorTTL`). Returns `nil` when the entry is not found (or on certain errors, depending on `LoadOneFunc`).
+-   **GetWithError(ID)** — same as `Get`, but returns `(value *T, err error)` that tell why there is no value: `ErrNotFound`, or the error of the failed load (kept in cache for `ErrorTTL`). A value kept in cache after a failed reload is returned without an error. Use it to tell a missing record from an unavailable data source (e.g. 404 vs. 503).
 -   **GetMultiple(IDs)** — returns `map[K]*T` for a batch of keys. Valid entries are served from cache, all the remaining IDs are loaded in a single `LoadMultipleFunc` call (or one by one via `Get` when `LoadMultipleFunc` is not set). Duplicate IDs are merged and keys missing in the result mean “not found”. See [Batch loading](#batch-loading).
 -   **GetCached(ID)** — returns `(value *T, exists bool)` from cache only; no lazy load or reload. `exists` is false if the key is missing or the entry has expired.
 -   **Remove(ID)** — deletes the entry from the cache together with its scheduled TTL eviction and automatic reload.

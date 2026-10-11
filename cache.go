@@ -121,7 +121,21 @@ func (c *Cache[K, T]) now() int64 {
 	return time.Since(c.epoch).Milliseconds()
 }
 
+// Get returns nil when the entry is not found or its load has failed
 func (c *Cache[K, T]) Get(ID K) *T {
+	return c.lookup(ID).get()
+}
+
+// GetWithError is Get that tells why there is no value: ErrNotFound, or the
+// error of the failed load (kept for ErrorTTL). A value kept after a failed
+// reload comes without an error.
+func (c *Cache[K, T]) GetWithError(ID K) (*T, error) {
+	return c.lookup(ID).getWithError()
+}
+
+// lookup returns the entry of ID, loaded or reloaded when needed; with zero
+// TTL of the load result the entry is not stored in cache
+func (c *Cache[K, T]) lookup(ID K) *cachedEntry[K, T] {
 	c.mu.RLock()
 	entry, exists := c.data[ID]
 	c.mu.RUnlock()
@@ -136,7 +150,7 @@ func (c *Cache[K, T]) Get(ID K) *T {
 	if exists {
 		// valid value
 		if nowMillis < entry.nextReload.Load() {
-			return entry.get()
+			return entry
 		}
 
 		// data are expired, check if entry is being reloaded
@@ -146,7 +160,7 @@ func (c *Cache[K, T]) Get(ID K) *T {
 		if nowMillis < entry.nextReload.Load() {
 			entry.mu.Unlock()
 
-			return entry.get()
+			return entry
 		}
 
 		// reload entry
@@ -166,7 +180,7 @@ func (c *Cache[K, T]) Get(ID K) *T {
 			}
 		}
 
-		return entry.get()
+		return entry
 	}
 
 	// not found in cache
@@ -190,7 +204,7 @@ func (c *Cache[K, T]) Get(ID K) *T {
 		c.deleteEntryLocked(entry)
 		c.mu.Unlock()
 
-		return entry.value.Load()
+		return entry
 	}
 
 	c.scheduleEntry(entry, ttl, nowMillis)
@@ -202,7 +216,7 @@ func (c *Cache[K, T]) Get(ID K) *T {
 		}
 	}
 
-	return entry.get()
+	return entry
 }
 
 // GetMultiple returns values for the given IDs. Entries which are still valid

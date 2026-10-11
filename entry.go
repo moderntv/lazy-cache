@@ -10,10 +10,11 @@ import (
 )
 
 type cachedEntry[K comparable, T any] struct {
-	nextReload    atomic.Int64      // time of next reload (cache time in milliseconds, see Cache.now)
-	accessed      atomic.Bool       // true if entry data was accessed since last (re)load
-	value         atomic.Pointer[T] // nil when not found
-	invalidations atomic.Uint64     // number of Invalidate calls (detects invalidation during load)
+	nextReload    atomic.Int64          // time of next reload (cache time in milliseconds, see Cache.now)
+	accessed      atomic.Bool           // true if entry data was accessed since last (re)load
+	value         atomic.Pointer[T]     // nil when not found
+	loadErr       atomic.Pointer[error] // error of the last load, nil after a successful or not-found load
+	invalidations atomic.Uint64         // number of Invalidate calls (detects invalidation during load)
 	mu            sync.Mutex
 
 	// scheduling of TTL eviction and automatic reload (protected by Cache.mu)
@@ -46,6 +47,9 @@ func (e *cachedEntry[K, T]) set(value *T, err error, nowMillis int64, timeouts *
 	if err != nil {
 		// skip any error except NotFound
 		if !errors.Is(err, ErrNotFound) {
+			loadErr := err
+			e.loadErr.Store(&loadErr)
+
 			// in case of first load, set error TTL
 			if init {
 				ttl = utils.RandomizeDuration(timeouts.ErrorTTL, timeouts.Randomizer)
@@ -59,12 +63,14 @@ func (e *cachedEntry[K, T]) set(value *T, err error, nowMillis int64, timeouts *
 		if e.value.Load() != nil {
 			e.value.Store(nil)
 		}
+		e.clearLoadErr()
 
 		goto end
 	}
 
 	ttl = utils.RandomizeDuration(timeouts.TTL, timeouts.Randomizer)
 	e.value.Store(value)
+	e.clearLoadErr()
 
 	// set `accessed` and `nextReload` every time and AFTER value is stored
 	// (if they are set before `value`, cache can in some circumstances read old value
@@ -95,6 +101,29 @@ func (e *cachedEntry[K, T]) get() *T {
 	}
 
 	return e.value.Load()
+}
+
+// getWithError reads the error before the value: set stores the value before
+// it clears the error, so a missing value never comes without its error
+func (e *cachedEntry[K, T]) getWithError() (*T, error) {
+	loadErr := e.loadErr.Load()
+	value := e.get()
+	if value != nil {
+		return value, nil
+	}
+
+	if loadErr != nil {
+		return nil, *loadErr
+	}
+
+	return nil, ErrNotFound
+}
+
+// clearLoadErr must be called after the value is stored, see getWithError
+func (e *cachedEntry[K, T]) clearLoadErr() {
+	if e.loadErr.Load() != nil {
+		e.loadErr.Store(nil)
+	}
 }
 
 // func (e *cachedEntry[K, T]) memSize() uint64 {
