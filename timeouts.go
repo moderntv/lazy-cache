@@ -34,7 +34,8 @@ type Timeouts struct {
 
 	// ReloadInterval specifies how often the entry should be reloaded or how
 	// long its data are valid in cache.
-	// The duration is being randomized by `Randomizer`.
+	// The duration is being randomized by `Randomizer`. The first reload of
+	// the entry is spread (see `DisableSpreadInitialReload`).
 	// When entry is being invalidated (by `Invalidate` function call),
 	// immediate reload is triggered (in background) only when entry was
 	// accessed (via `Get` function) since last reload. If entry was not
@@ -42,6 +43,28 @@ type Timeouts struct {
 	// (if `AutomaticReload` is enabled) or until `Get` function is called on
 	// the entry.
 	ReloadInterval time.Duration `mapstructure:"reload_interval"`
+
+	// DisableSpreadInitialReload disables spreading of the first reloads.
+	// By default, the first reload after the first successful load of an
+	// entry (preloading, `Get` of an entry missing in cache, `GetMultiple`)
+	// is planned at a random time from
+	// [`Randomizer` * `ReloadInterval`, (1 + `Randomizer`) * `ReloadInterval`).
+	// Entries loaded at once (e.g. by preloading) are thus reloaded evenly
+	// from the start instead of all of them waiting the whole
+	// `ReloadInterval` and then being reloaded in a wave. The window is as
+	// wide as `ReloadInterval` (narrower window would leave a gap repeating
+	// in every following reload interval) and it is shifted, so just loaded
+	// data are not reloaded right away.
+	// All following reloads are planned after `ReloadInterval` randomized by
+	// `Randomizer`, so the average reload interval is not shortened.
+	// TTL is not affected and first loads which fail or end with NotFound
+	// are not spread.
+	// Data of the first load are valid (e.g. for `GetCached`) only until
+	// the spread reload time, which can be as soon as
+	// `Randomizer` * `ReloadInterval` (or right away with zero `Randomizer`).
+	// When set to true, also the first reload is planned after
+	// `ReloadInterval` randomized by `Randomizer`.
+	DisableSpreadInitialReload bool `mapstructure:"disable_spread_initial_reload"`
 
 	// Randomizer specifies how much the timeouts/durations should be
 	// randomized. Value 0 means no randomization, 0.1 means 10% randomization,

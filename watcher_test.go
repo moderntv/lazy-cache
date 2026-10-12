@@ -340,6 +340,8 @@ func TestWatcherEntryReplacedDuringLoad(t *testing.T) {
 			NotFoundTTL:    0, // Get removes not found entries
 			ErrorTTL:       1 * time.Second,
 			ReloadInterval: 3 * time.Second,
+			// the entry from GetMultiple must stay valid until the end of the test
+			DisableSpreadInitialReload: true,
 		},
 		AutomaticReload: AutomaticReloadAllEntries,
 	})

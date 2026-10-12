@@ -32,7 +32,8 @@ var entryTestTimeouts = Timeouts{
 	Randomizer:     0,
 }
 
-// Test entry set without error
+// Test first entry set which fails - its reload is not spread (successful first
+// set is tested by TestEntrySetFirstTimeSpreadsReload)
 func TestEntrySetFirstTime(t *testing.T) {
 	var nowMillis int64 = 1700000000
 
@@ -61,14 +62,6 @@ func TestEntrySetFirstTime(t *testing.T) {
 			expectedNextReload: nowMillis + entryTestTimeouts.ReloadInterval.Milliseconds(),
 			expectedAccessed:   false,
 		},
-		"success": {
-			loadedValue:        test_utils.StringPointer("value1"),
-			err:                nil,
-			expectedTTL:        entryTestTimeouts.TTL,
-			expectedValue:      test_utils.StringPointer("value1"),
-			expectedNextReload: nowMillis + entryTestTimeouts.ReloadInterval.Milliseconds(),
-			expectedAccessed:   false,
-		},
 	}
 
 	for name, tc := range tests {
@@ -83,6 +76,124 @@ func TestEntrySetFirstTime(t *testing.T) {
 
 		})
 	}
+}
+
+// First successful set plans the reload at a random time from a window as wide
+// as ReloadInterval, shifted by Randomizer part of ReloadInterval
+func TestEntrySetFirstTimeSpreadsReload(t *testing.T) {
+	var nowMillis int64 = 1700000000
+
+	// ReloadInterval is 3s, reload is expected in
+	// [nowMillis + minReloadIn, nowMillis + maxReloadIn)
+	tests := map[string]struct {
+		randomizer  float64
+		minReloadIn int64
+		maxReloadIn int64
+	}{
+		"without_randomizer": {randomizer: 0, minReloadIn: 0, maxReloadIn: 3000},
+		"randomizer":         {randomizer: 0.2, minReloadIn: 600, maxReloadIn: 3600},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			timeouts := entryTestTimeouts
+			timeouts.Randomizer = tc.randomizer
+
+			tries := 10000
+			treshhold := 2000
+
+			outOfRange := 0
+			quarters := [4]int{}
+
+			for i := 0; i < tries; i++ {
+				e := newCachedEntry[int, string](0)
+				_ = e.set(test_utils.StringPointer("value1"), nil, nowMillis, &timeouts, true)
+
+				reloadIn := e.nextReload.Load() - nowMillis
+				if reloadIn < tc.minReloadIn || reloadIn >= tc.maxReloadIn {
+					outOfRange++
+					continue
+				}
+				quarters[(reloadIn-tc.minReloadIn)*4/(tc.maxReloadIn-tc.minReloadIn)]++
+			}
+
+			t.Logf("nextReload in quarters of the window: %v", quarters)
+
+			assert.Zero(t, outOfRange, "nextReload out of [now + %d, now + %d)", tc.minReloadIn, tc.maxReloadIn)
+			for i, count := range quarters {
+				assert.Greater(t, count, treshhold, "nextReload in quarter %d of the window", i)
+			}
+		})
+	}
+}
+
+// Spreading of the first reload does not affect TTL nor the loaded value
+func TestEntrySetFirstTimeSpreadKeepsTTL(t *testing.T) {
+	var nowMillis int64 = 1700000000
+
+	e := newCachedEntry[int, string](0)
+	e.accessed.Store(true)
+
+	ttl := e.set(test_utils.StringPointer("value1"), nil, nowMillis, &entryTestTimeouts, true)
+	assert.Equal(t, entryTestTimeouts.TTL, ttl, "incorrect TTL")
+	assert.Equal(t, test_utils.StringPointer("value1"), e.value.Load(), "incorrect value")
+	assert.False(t, e.accessed.Load(), "incorrect accessed")
+}
+
+// Only the first reload is spread, reloads after it are planned after
+// ReloadInterval randomized by Randomizer
+func TestEntryReloadAfterSpreadFirstSet(t *testing.T) {
+	var nowMillis int64 = 1700000000
+	randomizedTimeouts := entryTestTimeouts
+	randomizedTimeouts.Randomizer = 0.2
+	// ReloadInterval 3s +/- 20%
+	var minNextReload int64 = nowMillis + 2400
+	var maxNextReload int64 = nowMillis + 3600
+	var referenceNextReload int64 = nowMillis + 3000
+
+	tries := 10000
+	treshhold := 4000
+
+	outOfRange := 0
+	lessThanReference := 0
+	greaterThanReference := 0
+
+	for i := 0; i < tries; i++ {
+		// entry was first loaded 500ms ago
+		e := newCachedEntry[int, string](0)
+		_ = e.set(test_utils.StringPointer("value0"), nil, nowMillis-500, &randomizedTimeouts, true)
+
+		_ = e.set(test_utils.StringPointer("value1"), nil, nowMillis, &randomizedTimeouts, false)
+
+		nextReload := e.nextReload.Load()
+		if nextReload < minNextReload || nextReload > maxNextReload {
+			outOfRange++
+		}
+		if nextReload < referenceNextReload {
+			lessThanReference++
+		} else if nextReload > referenceNextReload {
+			greaterThanReference++
+		}
+	}
+
+	assert.Zero(t, outOfRange, "nextReload out of ReloadInterval +/- Randomizer")
+	assert.Greater(t, lessThanReference, treshhold)
+	assert.Greater(t, greaterThanReference, treshhold)
+}
+
+// With DisableSpreadInitialReload the first successful set plans the reload
+// after ReloadInterval like any other set
+func TestEntrySetFirstTimeSpreadDisabled(t *testing.T) {
+	var nowMillis int64 = 1700000000
+	timeouts := entryTestTimeouts
+	timeouts.DisableSpreadInitialReload = true
+
+	e := newCachedEntry[int, string](0)
+
+	ttl := e.set(test_utils.StringPointer("value1"), nil, nowMillis, &timeouts, true)
+	assert.Equal(t, timeouts.TTL, ttl, "incorrect TTL")
+	assert.Equal(t, test_utils.StringPointer("value1"), e.value.Load(), "incorrect value")
+	assert.Equal(t, nowMillis+timeouts.ReloadInterval.Milliseconds(), e.nextReload.Load(), "incorrect next reload")
 }
 
 func TestEntryReloadAfterError(t *testing.T) {

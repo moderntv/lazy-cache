@@ -23,6 +23,15 @@ var cacheTestTimeouts = Timeouts{
 	Randomizer:     0,
 }
 
+// timeoutsNoSpread returns timeouts with the first reload planned after
+// ReloadInterval, for tests which rely on entries being valid for the whole
+// ReloadInterval after their first load
+func timeoutsNoSpread(timeouts Timeouts) Timeouts {
+	timeouts.DisableSpreadInitialReload = true
+
+	return timeouts
+}
+
 // cacheEntryOf reads an entry directly from the cache map. Tests must not touch
 // c.data without the lock - background watchers write into it concurrently.
 func cacheEntryOf[K comparable, T any](c *Cache[K, T], ID K) *cachedEntry[K, T] {
@@ -149,6 +158,8 @@ func testCacheErrorEntryReload(t *testing.T) {
 		ErrorTTL:       0,
 		ReloadInterval: 1 * time.Second,
 		Randomizer:     0,
+		// the test relies on the first reload after ReloadInterval
+		DisableSpreadInitialReload: true,
 	}
 
 	increment := 0
@@ -286,7 +297,7 @@ func testCacheEntryAutomaticReloadAll(t *testing.T) {
 			loadCounter.Add(1)
 			return test_utils.StringPointer("value"), nil
 		},
-		Timeouts:        cacheTestTimeouts,
+		Timeouts:        timeoutsNoSpread(cacheTestTimeouts),
 		AutomaticReload: AutomaticReloadAllEntries,
 	})
 
@@ -372,7 +383,7 @@ func testCacheGetCached(t *testing.T) {
 		LoadOneFunc: func(ID int) (entry *string, err error) {
 			return test_utils.StringPointer("value_" + strconv.Itoa(ID)), nil
 		},
-		Timeouts:        cacheTestTimeouts,
+		Timeouts:        timeoutsNoSpread(cacheTestTimeouts),
 		AutomaticReload: AutomaticReloadDisabled,
 	})
 
@@ -713,7 +724,7 @@ func TestGetMultipleAllFromCache(t *testing.T) {
 			}
 			return
 		},
-		Timeouts:        cacheTestTimeouts,
+		Timeouts:        timeoutsNoSpread(cacheTestTimeouts),
 		AutomaticReload: AutomaticReloadDisabled,
 	})
 
@@ -758,7 +769,7 @@ func TestGetMultiplePartialHit(t *testing.T) {
 			}
 			return
 		},
-		Timeouts:        cacheTestTimeouts,
+		Timeouts:        timeoutsNoSpread(cacheTestTimeouts),
 		AutomaticReload: AutomaticReloadDisabled,
 	})
 
@@ -809,7 +820,7 @@ func TestGetMultipleMissingIDs(t *testing.T) {
 			}
 			return
 		},
-		Timeouts:        cacheTestTimeouts,
+		Timeouts:        timeoutsNoSpread(cacheTestTimeouts),
 		AutomaticReload: AutomaticReloadDisabled,
 	})
 
@@ -1014,6 +1025,8 @@ func TestGetMultipleExpiredEntry(t *testing.T) {
 		ErrorTTL:       1 * time.Second,
 		ReloadInterval: 1 * time.Second,
 		Randomizer:     0,
+		// the test relies on the first reload after ReloadInterval
+		DisableSpreadInitialReload: true,
 	}
 
 	spy := &batchLoaderSpy{}

@@ -19,7 +19,7 @@ The cache uses Go generics: key type `K` must be `comparable`, value type `T` is
 
 ## Lifecycle
 
-`New(...)` does not perform an initial full load. With `PreloadChan != nil`, a goroutine consumes `LoadedEntry[K,T]` from the channel and adds them to the cache; preloading ends when the channel is closed. `Ready()` blocks until that goroutine exits. With `PreloadChan == nil`, preloading is disabled and `Ready()` returns immediately.
+`New(...)` does not perform an initial full load. With `PreloadChan != nil`, a goroutine consumes `LoadedEntry[K,T]` from the channel and adds them to the cache; preloading ends when the channel is closed. `Ready()` blocks until that goroutine exits. First reloads of preloaded entries are spread over `ReloadInterval` (see `DisableSpreadInitialReload`). With `PreloadChan == nil`, preloading is disabled and `Ready()` returns immediately.
 
 A watcher runs in the background. It keeps entries in a single min-heap ordered by their nearest deadline (TTL eviction or automatic reload), removes entries whose TTL has passed and, if `AutomaticReload` is not `AutomaticReloadDisabled`, hands entries due for reload over to a reload worker (respecting `AutomaticReloadAccessedEntries` vs `AutomaticReloadAllEntries`). Reloads run one by one in the worker, so slow loads do not delay evictions. The watcher sleeps until the nearest deadline, keeping at least 100 ms between runs so that events due close together are handled at once; it is woken up earlier only when an entry needs to be handled sooner (e.g. after `Invalidate`). Expired entries are evicted in batches, so a mass expiration does not block the cache for long. If `Timeouts.MemsizeUpdate > 0` and `MetricsRegistry` is set, memory usage is periodically recalculated.
 
@@ -74,8 +74,9 @@ if user, ok := users[2]; ok {
 -   **TTL** — Time-to-live. After this duration from the last load (with renewal on access and successful reload), the entry is removed. Randomized by `Randomizer`. Required, must be > 0.
 -   **NotFoundTTL** — TTL when the entry is “not found” (`ErrNotFound`) or when the first load of a new key fails with `ErrNotFound`. Randomized by `Randomizer`. If 0, not-found entries are not stored.
 -   **ErrorTTL** — TTL when the first load of a new key fails with an error other than `ErrNotFound`. Randomized by `Randomizer`. If 0, such entries are not stored.
--   **ReloadInterval** — How long an entry is considered fresh before it is reloaded. Must be ≤ `TTL`. Randomized by `Randomizer`.
--   **Randomizer** — `[0, 1]`. 0 = no jitter; 0.1 = ±10%. Applied to TTL, NotFoundTTL, ErrorTTL, and ReloadInterval.
+-   **ReloadInterval** — How long an entry is considered fresh before it is reloaded. Must be ≤ `TTL`. Randomized by `Randomizer`; the first reload is spread (see `DisableSpreadInitialReload`).
+-   **DisableSpreadInitialReload** (`disable_spread_initial_reload`) — By default (`false`), the first reload after the first successful load of an entry (preload, `Get` of a missing entry, `GetMultiple`) is planned at a random time from `[Randomizer × ReloadInterval, (1 + Randomizer) × ReloadInterval)`. Entries loaded at once — typically by preloading — are then reloaded evenly right from the start, instead of no reloads for a whole `ReloadInterval` followed by a wave of them. The window is exactly `ReloadInterval` wide, because a narrower one would leave a gap that repeats in every following interval. It is shifted by `Randomizer × ReloadInterval`, so freshly loaded data are not reloaded right away, and its end matches the latest reload without spreading. All later reloads use `ReloadInterval` ± `Randomizer`, so the average reload interval is not shortened. TTL is not affected, and failed or not-found first loads are not spread. Because of this, a freshly loaded entry may be treated as expired (e.g. by `GetCached`) as soon as after `Randomizer × ReloadInterval` (right away with zero `Randomizer`). Set to `true` to plan the first reload after `ReloadInterval` ± `Randomizer` like the others.
+-   **Randomizer** — `[0, 1]`. 0 = no jitter; 0.1 = ±10%. Applied to TTL, NotFoundTTL, ErrorTTL, and ReloadInterval (the spread first reload uses it only to shift its window).
 -   **MemsizeUpdate** — Interval for recomputing memory usage when metrics are enabled. If 0, memory usage is not updated.
 
 ## Params
@@ -86,7 +87,7 @@ if user, ok := users[2]; ok {
 -   **Name** — Cache name used in logs and metrics. Required.
 -   **LoadOneFunc** — `func(ID K) (*T, error)`. Loads one entry. Return `ErrNotFound` for not found. Required.
 -   **LoadMultipleFunc** — `func(IDs []K) []LoadedEntry[K, T]`. Optional; used by `GetMultiple` to load a whole batch at once. See [Batch loading](#batch-loading).
--   **Timeouts** — TTL, NotFoundTTL, ErrorTTL, ReloadInterval, Randomizer, MemsizeUpdate. Required; `ReloadInterval` ≤ `TTL`, `TTL` > 0.
+-   **Timeouts** — TTL, NotFoundTTL, ErrorTTL, ReloadInterval, DisableSpreadInitialReload, Randomizer, MemsizeUpdate. Required; `ReloadInterval` ≤ `TTL`, `TTL` > 0.
 -   **PreloadChan** — `<-chan LoadedEntry[K,T]`. If non-nil, a goroutine consumes entries until the channel is closed. Optional.
 -   **AutomaticReload** — `AutomaticReloadDisabled`, `AutomaticReloadAccessedEntries`, or `AutomaticReloadAllEntries`.
 

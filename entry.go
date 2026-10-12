@@ -79,7 +79,19 @@ end:
 	if e.accessed.Load() {
 		e.accessed.Store(false)
 	}
-	e.nextReload.Store(nowMillis + utils.RandomizeDuration(timeouts.ReloadInterval, timeouts.Randomizer).Milliseconds())
+
+	var reloadIn time.Duration
+	if init && err == nil && !timeouts.DisableSpreadInitialReload {
+		// spread first reloads of entries loaded at once (e.g. preloaded)
+		// evenly over a window as wide as ReloadInterval, so they are not
+		// reloaded all together; the window is shifted by Randomizer part of
+		// ReloadInterval, so just loaded data are not reloaded right away
+		minReloadIn := time.Duration(float64(timeouts.ReloadInterval) * timeouts.Randomizer)
+		reloadIn = minReloadIn + utils.RandomDurationUpTo(timeouts.ReloadInterval)
+	} else {
+		reloadIn = utils.RandomizeDuration(timeouts.ReloadInterval, timeouts.Randomizer)
+	}
+	e.nextReload.Store(nowMillis + reloadIn.Milliseconds())
 
 	return
 }
