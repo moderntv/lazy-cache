@@ -61,6 +61,7 @@ func TestCache(t *testing.T) {
 	t.Run("get_cached", testCacheGetCached)
 	t.Run("expired_entry_concurrent_reload", testCacheExpiredEntryConcurrentReload)
 	t.Run("expired_entry_double_check", testCacheExpiredEntryDoubleCheck)
+	t.Run("missing_entry_concurrent_load", testCacheMissingEntryConcurrentLoad)
 }
 
 func testCacheParallelism(t *testing.T) {
@@ -605,6 +606,57 @@ func testCacheExpiredEntryDoubleCheck(t *testing.T) {
 
 	// Only 2 loads total (initial + one reload)
 	assert.Equal(t, int64(2), loadCounter.Load())
+}
+
+// testCacheMissingEntryConcurrentLoad tests that concurrent Get calls of an
+// entry missing in cache load it only once - the routines wait for the load of
+// the routine which stored the entry first instead of loading it again
+func testCacheMissingEntryConcurrentLoad(t *testing.T) {
+	t.Parallel()
+
+	loadCounter := atomic.Int64{}
+
+	c, err := New(Params[int, string]{
+		Context: testContext(t),
+		Log:     test_utils.Logger(),
+		Name:    "test_cache_missing_entry_concurrent_load",
+		LoadOneFunc: func(ID int) (entry *string, err error) {
+			loadCounter.Add(1)
+			time.Sleep(10 * time.Millisecond) // keep the load in progress while the others miss the entry
+			return test_utils.StringPointer("value_" + strconv.Itoa(ID)), nil
+		},
+		// the first reload must not be due before the other routines get the entry
+		Timeouts:        timeoutsNoSpread(cacheTestTimeouts),
+		AutomaticReload: AutomaticReloadDisabled,
+	})
+
+	assert.Nil(t, err)
+
+	routines := 10
+	wg := sync.WaitGroup{}
+	results := make([]*string, routines)
+
+	// the routines wait for the cache lock, so all of them find the entry
+	// missing at once when it is released
+	c.Lock()
+	for i := 0; i < routines; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			results[idx] = c.Get(0)
+		}(i)
+	}
+	time.Sleep(50 * time.Millisecond) // let all routines block on the lock
+	c.Unlock()
+
+	wg.Wait()
+
+	assert.Equal(t, int64(1), loadCounter.Load(), "the missing entry should be loaded only once")
+	for i := 0; i < routines; i++ {
+		if assert.NotNil(t, results[i]) {
+			assert.Equal(t, "value_0", *results[i])
+		}
+	}
 }
 
 // TestInvalidateDuringLoad checks that Invalidate called while the entry is

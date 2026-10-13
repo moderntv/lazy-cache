@@ -134,7 +134,8 @@ func (c *Cache[K, T]) GetWithError(ID K) (*T, error) {
 }
 
 // lookup returns the entry of ID, loaded or reloaded when needed; with zero
-// TTL of the load result the entry is not stored in cache
+// TTL of the load result the entry is not stored in cache. Concurrent lookups
+// of one ID load (or reload) it only once, the others wait for that load.
 func (c *Cache[K, T]) lookup(ID K) *cachedEntry[K, T] {
 	c.mu.RLock()
 	entry, exists := c.data[ID]
@@ -148,46 +149,24 @@ func (c *Cache[K, T]) lookup(ID K) *cachedEntry[K, T] {
 
 	// entry found in cache
 	if exists {
-		// valid value
-		if nowMillis < entry.nextReload.Load() {
-			return entry
-		}
-
-		// data are expired, check if entry is being reloaded
-		entry.mu.Lock()
-
-		// check if entry was loaded by other routine during waiting for lock
-		if nowMillis < entry.nextReload.Load() {
-			entry.mu.Unlock()
-
-			return entry
-		}
-
-		// reload entry
-		invalidations := entry.invalidations.Load()
-		loadedValue, err := c.loadOneFunc(ID)
-		ttl := entry.set(loadedValue, err, nowMillis, &c.timeouts, false)
-		entry.expireIfInvalidated(invalidations)
-
-		entry.mu.Unlock()
-
-		c.scheduleEntry(entry, ttl, nowMillis)
-
-		if c.metrics != nil {
-			c.metrics.LazyLoadCount.Inc()
-			if err != nil && !errors.Is(err, ErrNotFound) {
-				c.metrics.ErrorLoadCount.Inc()
-			}
-		}
-
-		return entry
+		return c.reloadIfExpired(entry, nowMillis)
 	}
 
 	// not found in cache
 	entry = newCachedEntry[K, T](ID)
-	entry.mu.Lock()
 
 	c.mu.Lock()
+	// other routine may have stored the entry since the read lock was released,
+	// then wait for its load instead of loading the entry again
+	stored, exists := c.data[ID]
+	if exists {
+		c.mu.Unlock()
+
+		return c.reloadIfExpired(stored, nowMillis)
+	}
+	// the entry is locked before it is visible to other routines, so they wait
+	// for its load
+	entry.mu.Lock()
 	c.storeEntryLocked(entry)
 	c.mu.Unlock()
 
@@ -206,6 +185,45 @@ func (c *Cache[K, T]) lookup(ID K) *cachedEntry[K, T] {
 
 		return entry
 	}
+
+	c.scheduleEntry(entry, ttl, nowMillis)
+
+	if c.metrics != nil {
+		c.metrics.LazyLoadCount.Inc()
+		if err != nil && !errors.Is(err, ErrNotFound) {
+			c.metrics.ErrorLoadCount.Inc()
+		}
+	}
+
+	return entry
+}
+
+// reloadIfExpired returns the entry found in cache, reloaded when its data are
+// expired. Concurrent callers wait for one reload (or the first load still in
+// progress) instead of reloading the entry again.
+func (c *Cache[K, T]) reloadIfExpired(entry *cachedEntry[K, T], nowMillis int64) *cachedEntry[K, T] {
+	// valid value
+	if nowMillis < entry.nextReload.Load() {
+		return entry
+	}
+
+	// data are expired, check if entry is being reloaded
+	entry.mu.Lock()
+
+	// check if entry was loaded by other routine during waiting for lock
+	if nowMillis < entry.nextReload.Load() {
+		entry.mu.Unlock()
+
+		return entry
+	}
+
+	// reload entry
+	invalidations := entry.invalidations.Load()
+	loadedValue, err := c.loadOneFunc(entry.id)
+	ttl := entry.set(loadedValue, err, nowMillis, &c.timeouts, false)
+	entry.expireIfInvalidated(invalidations)
+
+	entry.mu.Unlock()
 
 	c.scheduleEntry(entry, ttl, nowMillis)
 

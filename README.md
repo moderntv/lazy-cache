@@ -45,7 +45,7 @@ A watcher runs in the background. It keeps entries in a single min-heap ordered 
 Two things are worth knowing before using it:
 
 -   **The loader does not have to return an entry for every requested ID.** IDs missing from its result are stored as not-found by the cache itself (for `NotFoundTTL`), so the next `GetMultiple` does not ask for them again. Without this, sparse batches would hit the storage on every call.
--   **`GetMultiple` does not do single-flight.** Unlike `Get`, which serializes concurrent reloads of one key on that entry's mutex, two concurrent batches sharing an ID — or a batch running concurrently with `Get` of the same ID — load that entry more than once. Both loads store the same value, so the only cost is a redundant load. Preloading behaves the same way.
+-   **`GetMultiple` does not do single-flight.** Unlike `Get`, which serializes concurrent loads and reloads of one key on that entry's mutex, two concurrent batches sharing an ID — or a batch running concurrently with `Get` of the same ID — load that entry more than once. Both loads store the same value, so the only cost is a redundant load. Preloading behaves the same way.
 
 Loaded entries go through the same path as preloaded ones, so `TTL`, `NotFoundTTL`, `ErrorTTL`, `Randomizer`, TTL eviction and automatic reload apply as usual. An entry that already exists in cache is not overwritten by a failed load (errors other than `ErrNotFound`).
 
