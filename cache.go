@@ -190,6 +190,10 @@ func (c *Cache[K, T]) lookup(ID K) *cachedEntry[K, T] {
 // expired. Concurrent callers wait for one reload (or the first load still in
 // progress) instead of reloading the entry again.
 func (c *Cache[K, T]) reloadIfExpired(entry *cachedEntry[K, T], nowMillis int64) *cachedEntry[K, T] {
+	// read before the data are checked, so a load finished since then is
+	// detected after waiting for lock
+	loads := entry.loads.Load()
+
 	// valid value
 	if nowMillis < entry.nextReload.Load() {
 		return entry
@@ -198,8 +202,12 @@ func (c *Cache[K, T]) reloadIfExpired(entry *cachedEntry[K, T], nowMillis int64)
 	// data are expired, check if entry is being reloaded
 	entry.mu.Lock()
 
-	// check if entry was loaded by other routine during waiting for lock
-	if nowMillis < entry.nextReload.Load() {
+	// check if entry was loaded by other routine during waiting for lock; data
+	// loaded meanwhile are used even when they are already due for reload (e.g.
+	// the first reload spread right after the load), unless the entry has been
+	// invalidated since the load started
+	if nowMillis < entry.nextReload.Load() ||
+		(entry.loads.Load() != loads && entry.invalidations.Load() == entry.loadInvalidations) {
 		entry.mu.Unlock()
 
 		return entry
@@ -240,6 +248,8 @@ func (c *Cache[K, T]) loadEntry(entry *cachedEntry[K, T], nowMillis int64, init 
 	accessed = entry.accessed.Load()
 	ttl = entry.set(loadedValue, err, nowMillis, &c.timeouts, init)
 	entry.expireIfInvalidated(invalidations)
+	entry.loadInvalidations = invalidations
+	entry.loads.Add(1)
 
 	return ttl, accessed, err
 }

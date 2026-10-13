@@ -165,3 +165,82 @@ func TestGetConcurrentMissesLoadOnce(t *testing.T) {
 
 	assert.Equal(t, int64(entries), loadCounter.Load(), "each missing entry should be loaded only once")
 }
+
+// TestGetUsesLoadWaitedFor checks that Get waiting for a load of other routine
+// uses its data even when they are due for reload by then (e.g. the first
+// reload spread right after the load with zero Randomizer), so the entry is
+// not loaded again right away. Data invalidated during the load are not used.
+func TestGetUsesLoadWaitedFor(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		cachedBefore bool   // entry is in cache (expired) before the load waited for
+		invalidate   bool   // entry is invalidated during the load, before Get starts waiting
+		loads        int64  // expected number of loads
+		value        string // expected value of the waiting Get
+	}{
+		"first_load":             {loads: 1, value: "value_1"},
+		"reload":                 {cachedBefore: true, loads: 2, value: "value_2"},
+		"first_load_invalidated": {invalidate: true, loads: 2, value: "value_2"},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			loadCounter := atomic.Int64{}
+			blockLoad := atomic.Bool{}
+			loadStarted := make(chan struct{})
+			loadRelease := make(chan struct{})
+
+			// data of each load are due for reload before the waiting Get gets them
+			timeouts := cacheTestTimeouts
+			timeouts.ReloadInterval = time.Millisecond
+
+			c, err := New(Params[int, string]{
+				Context: testContext(t),
+				Log:     test_utils.Logger(),
+				Name:    "test_get_uses_load_waited_for",
+				LoadOneFunc: func(ID int) (*string, error) {
+					count := loadCounter.Add(1)
+					if blockLoad.CompareAndSwap(true, false) {
+						close(loadStarted)
+						<-loadRelease
+					}
+					return test_utils.StringPointer("value_" + strconv.FormatInt(count, 10)), nil
+				},
+				Timeouts:        timeouts,
+				AutomaticReload: AutomaticReloadDisabled,
+			})
+			require.NoError(t, err)
+
+			if tc.cachedBefore {
+				require.Equal(t, "value_1", *c.Get(0))
+				time.Sleep(5 * time.Millisecond) // let the data expire
+			}
+
+			blockLoad.Store(true)
+			loading := make(chan *string, 1)
+			go func() { loading <- c.Get(0) }()
+			<-loadStarted
+
+			if tc.invalidate {
+				c.Invalidate(0)
+			}
+
+			time.Sleep(5 * time.Millisecond) // the waiting Get starts after the data are due for reload
+			waiting := make(chan *string, 1)
+			go func() { waiting <- c.Get(0) }()
+			time.Sleep(50 * time.Millisecond) // let the routine block on the entry
+
+			close(loadRelease)
+			<-loading
+
+			value := <-waiting
+			if assert.NotNil(t, value) {
+				assert.Equal(t, tc.value, *value)
+			}
+			assert.Equal(t, tc.loads, loadCounter.Load())
+		})
+	}
+}
