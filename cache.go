@@ -217,14 +217,29 @@ func (c *Cache[K, T]) reloadIfExpired(entry *cachedEntry[K, T], nowMillis int64)
 // loadEntry loads data of the entry locked by the caller and unlocks it.
 // Returns TTL of the loaded data (see cachedEntry.set), whether the entry data
 // were accessed since the previous load and the load error.
+//
+// When LoadOneFunc panics, the entry is unlocked too, so routines waiting for
+// it do not block forever, and the panic is passed on. The entry of the first
+// load has no data then, it is removed from cache (it would stay there without
+// TTL otherwise).
 func (c *Cache[K, T]) loadEntry(entry *cachedEntry[K, T], nowMillis int64, init bool) (ttl time.Duration, accessed bool, err error) {
+	loaded := false
+	defer func() {
+		if !loaded && init {
+			c.mu.Lock()
+			c.deleteEntryLocked(entry)
+			c.mu.Unlock()
+		}
+
+		entry.mu.Unlock()
+	}()
+
 	invalidations := entry.invalidations.Load()
 	loadedValue, err := c.loadOneFunc(entry.id)
+	loaded = true
 	accessed = entry.accessed.Load()
 	ttl = entry.set(loadedValue, err, nowMillis, &c.timeouts, init)
 	entry.expireIfInvalidated(invalidations)
-
-	entry.mu.Unlock()
 
 	return ttl, accessed, err
 }

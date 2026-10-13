@@ -37,6 +37,7 @@ A watcher runs in the background. It keeps entries in a single min-heap ordered 
 -   Cached data may not reflect the current state of the underlying storage.
 -   `ReloadInterval` must be ≤ `TTL`. TTL should be at least about 2× `ReloadInterval` for smoother behavior.
 -   `GetMultiple` does **not** do single-flight (see [Batch loading](#batch-loading)).
+-   A panic of `LoadOneFunc` in `Get`/`GetWithError` is passed to the caller, and routines waiting for that load load the entry again. A panic during automatic reload is recovered and logged; the entry is then reloaded by `Get` once its data expire.
 
 ## Batch loading
 
