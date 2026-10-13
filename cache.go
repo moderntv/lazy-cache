@@ -153,29 +153,23 @@ func (c *Cache[K, T]) lookup(ID K) *cachedEntry[K, T] {
 	}
 
 	// not found in cache
-	entry = newCachedEntry[K, T](ID)
-
 	c.mu.Lock()
 	// other routine may have stored the entry since the read lock was released,
 	// then wait for its load instead of loading the entry again
-	stored, exists := c.data[ID]
+	entry, exists = c.data[ID]
 	if exists {
 		c.mu.Unlock()
 
-		return c.reloadIfExpired(stored, nowMillis)
+		return c.reloadIfExpired(entry, nowMillis)
 	}
 	// the entry is locked before it is visible to other routines, so they wait
 	// for its load
+	entry = newCachedEntry[K, T](ID)
 	entry.mu.Lock()
 	c.storeEntryLocked(entry)
 	c.mu.Unlock()
 
-	invalidations := entry.invalidations.Load()
-	loadedValue, err := c.loadOneFunc(ID)
-	ttl := entry.set(loadedValue, err, nowMillis, &c.timeouts, true)
-	entry.expireIfInvalidated(invalidations)
-
-	entry.mu.Unlock()
+	ttl, _, err := c.loadEntry(entry, nowMillis, true)
 
 	// do not store into cache when TTL is 0
 	if ttl == 0 {
@@ -187,13 +181,7 @@ func (c *Cache[K, T]) lookup(ID K) *cachedEntry[K, T] {
 	}
 
 	c.scheduleEntry(entry, ttl, nowMillis)
-
-	if c.metrics != nil {
-		c.metrics.LazyLoadCount.Inc()
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			c.metrics.ErrorLoadCount.Inc()
-		}
-	}
+	c.countLoad(false, err)
 
 	return entry
 }
@@ -218,23 +206,44 @@ func (c *Cache[K, T]) reloadIfExpired(entry *cachedEntry[K, T], nowMillis int64)
 	}
 
 	// reload entry
+	ttl, _, err := c.loadEntry(entry, nowMillis, false)
+
+	c.scheduleEntry(entry, ttl, nowMillis)
+	c.countLoad(false, err)
+
+	return entry
+}
+
+// loadEntry loads data of the entry locked by the caller and unlocks it.
+// Returns TTL of the loaded data (see cachedEntry.set), whether the entry data
+// were accessed since the previous load and the load error.
+func (c *Cache[K, T]) loadEntry(entry *cachedEntry[K, T], nowMillis int64, init bool) (ttl time.Duration, accessed bool, err error) {
 	invalidations := entry.invalidations.Load()
 	loadedValue, err := c.loadOneFunc(entry.id)
-	ttl := entry.set(loadedValue, err, nowMillis, &c.timeouts, false)
+	accessed = entry.accessed.Load()
+	ttl = entry.set(loadedValue, err, nowMillis, &c.timeouts, init)
 	entry.expireIfInvalidated(invalidations)
 
 	entry.mu.Unlock()
 
-	c.scheduleEntry(entry, ttl, nowMillis)
+	return ttl, accessed, err
+}
 
-	if c.metrics != nil {
-		c.metrics.LazyLoadCount.Inc()
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			c.metrics.ErrorLoadCount.Inc()
-		}
+// countLoad updates metrics after a load of one entry, lazy (by Get) or
+// automatic (by the reload worker)
+func (c *Cache[K, T]) countLoad(automatic bool, err error) {
+	if c.metrics == nil {
+		return
 	}
 
-	return entry
+	if automatic {
+		c.metrics.AutomaticLoadCount.Inc()
+	} else {
+		c.metrics.LazyLoadCount.Inc()
+	}
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		c.metrics.ErrorLoadCount.Inc()
+	}
 }
 
 // GetMultiple returns values for the given IDs. Entries which are still valid

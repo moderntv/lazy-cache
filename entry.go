@@ -16,9 +16,9 @@ type cachedEntry[K comparable, T any] struct {
 	loadErr       atomic.Pointer[error] // error of the last load, nil after a successful or not-found load
 	invalidations atomic.Uint64         // number of Invalidate calls (detects invalidation during load)
 	mu            sync.Mutex
+	id            K // never changes, so it is read without locks
 
 	// scheduling of TTL eviction and automatic reload (protected by Cache.mu)
-	id        K
 	expiresAt int64 // time of TTL eviction (cache time in milliseconds, noDeadline until first load finishes)
 	reloadAt  int64 // time of next automatic reload (cache time in milliseconds, noDeadline when not planned)
 	heapIdx   int   // position in Cache.schedule, -1 when not scheduled

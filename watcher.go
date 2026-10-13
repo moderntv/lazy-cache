@@ -2,7 +2,6 @@ package lazy
 
 import (
 	"container/heap"
-	"errors"
 	"math"
 	"runtime"
 	"time"
@@ -313,23 +312,11 @@ func (c *Cache[K, T]) reloadEntry(entry *cachedEntry[K, T]) {
 	entry.mu.Lock()
 
 	nowMillis := c.now()
-	invalidations := entry.invalidations.Load()
-	loadedValue, err := c.loadOneFunc(entry.id)
-	accessed := entry.accessed.Load()
-	ttl := entry.set(loadedValue, err, nowMillis, &c.timeouts, false)
-	entry.expireIfInvalidated(invalidations)
+	ttl, accessed, err := c.loadEntry(entry, nowMillis, false)
 	if !accessed {
 		ttl = -1 // do not prolong TTL for not accessed entries
 	}
 
-	entry.mu.Unlock()
-
 	c.scheduleEntry(entry, ttl, nowMillis)
-
-	if c.metrics != nil {
-		c.metrics.AutomaticLoadCount.Inc()
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			c.metrics.ErrorLoadCount.Inc()
-		}
-	}
+	c.countLoad(true, err)
 }
