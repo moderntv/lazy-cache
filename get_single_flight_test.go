@@ -45,7 +45,9 @@ func TestGetMissingEntryConcurrentLoad(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
+			testID := goroutineID()
 			loadCounter := atomic.Int64{}
+			routines := 10
 
 			c, err := New(Params[int, string]{
 				Context: testContext(t),
@@ -53,7 +55,10 @@ func TestGetMissingEntryConcurrentLoad(t *testing.T) {
 				Name:    "test_get_missing_entry_concurrent_load",
 				LoadOneFunc: func(ID int) (*string, error) {
 					loadCounter.Add(1)
-					time.Sleep(50 * time.Millisecond) // keep the load in progress while the others miss the entry
+					// keep the load in progress until all the other routines wait for it
+					if !waitForBlockedRoutines(testID, "sync.Mutex.Lock", ").reloadIfExpired", routines-1) {
+						t.Error("the other routines do not wait for the load")
+					}
 					if tc.loadErr != nil {
 						return nil, tc.loadErr
 					}
@@ -69,7 +74,6 @@ func TestGetMissingEntryConcurrentLoad(t *testing.T) {
 				err   error
 			}
 
-			routines := 10
 			wg := sync.WaitGroup{}
 			results := make([]result, routines)
 
@@ -84,7 +88,9 @@ func TestGetMissingEntryConcurrentLoad(t *testing.T) {
 					results[idx] = result{value: value, err: err}
 				}(i)
 			}
-			time.Sleep(50 * time.Millisecond) // let all routines block on the lock
+			require.True(t,
+				waitForBlockedRoutines(testID, "sync.RWMutex.RLock", ").lookup", routines),
+				"all routines should wait for the cache lock")
 			c.Unlock()
 
 			wg.Wait()
@@ -188,6 +194,7 @@ func TestGetUsesLoadWaitedFor(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
+			testID := goroutineID()
 			loadCounter := atomic.Int64{}
 			blockLoad := atomic.Bool{}
 			loadStarted := make(chan struct{})
@@ -231,7 +238,9 @@ func TestGetUsesLoadWaitedFor(t *testing.T) {
 			time.Sleep(5 * time.Millisecond) // the waiting Get starts after the data are due for reload
 			waiting := make(chan *string, 1)
 			go func() { waiting <- c.Get(0) }()
-			time.Sleep(50 * time.Millisecond) // let the routine block on the entry
+			require.True(t,
+				waitForBlockedRoutines(testID, "sync.Mutex.Lock", ").reloadIfExpired", 1),
+				"Get should wait for the load")
 
 			close(loadRelease)
 			<-loading

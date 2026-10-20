@@ -46,6 +46,7 @@ func TestLoadPanicReleasesEntry(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
+			testID := goroutineID()
 			panicLoad := atomic.Bool{}
 			loadStarted := make(chan struct{})
 			loadRelease := make(chan struct{})
@@ -82,7 +83,9 @@ func TestLoadPanicReleasesEntry(t *testing.T) {
 
 			waiting := make(chan *string, 1)
 			go func() { waiting <- c.Get(0) }()
-			time.Sleep(50 * time.Millisecond) // let the routine block on the entry
+			require.True(t,
+				waitForBlockedRoutines(testID, "sync.Mutex.Lock", ").reloadIfExpired", 1),
+				"Get should wait for the load")
 
 			close(loadRelease)
 			assert.Equal(t, "load failed", <-panicked, "the panic should be passed to the caller of Get")
