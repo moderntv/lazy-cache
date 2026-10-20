@@ -30,16 +30,18 @@ func getWithTimeout[K comparable, T any](t *testing.T, c *Cache[K, T], ID K) *T 
 }
 
 // TestLoadPanicReleasesEntry checks that a panic of LoadOneFunc in Get does not
-// leave the entry locked: the panic is passed to the caller of Get, and both the
-// routine waiting for the load and the following Get load the entry again.
+// leave the entry locked: the panic is passed to the caller of Get and the
+// routine waiting for the load loads the entry again - into cache, so the
+// following Get uses it.
 func TestLoadPanicReleasesEntry(t *testing.T) {
 	t.Parallel()
 
 	tests := map[string]struct {
-		cachedBefore bool // entry is in cache (expired) before the panicking load
+		cachedBefore bool  // entry is in cache (expired) before the panicking load
+		loads        int64 // expected number of loads
 	}{
-		"first_load": {cachedBefore: false},
-		"reload":     {cachedBefore: true},
+		"first_load": {cachedBefore: false, loads: 2},
+		"reload":     {cachedBefore: true, loads: 3},
 	}
 
 	for name, tc := range tests {
@@ -47,6 +49,7 @@ func TestLoadPanicReleasesEntry(t *testing.T) {
 			t.Parallel()
 
 			testID := goroutineID()
+			loadCounter := atomic.Int64{}
 			panicLoad := atomic.Bool{}
 			loadStarted := make(chan struct{})
 			loadRelease := make(chan struct{})
@@ -56,6 +59,7 @@ func TestLoadPanicReleasesEntry(t *testing.T) {
 				Log:     test_utils.Logger(),
 				Name:    "test_load_panic_releases_entry",
 				LoadOneFunc: func(ID int) (*string, error) {
+					loadCounter.Add(1)
 					if panicLoad.CompareAndSwap(true, false) {
 						close(loadStarted)
 						<-loadRelease
@@ -103,6 +107,7 @@ func TestLoadPanicReleasesEntry(t *testing.T) {
 			if assert.NotNil(t, value) {
 				assert.Equal(t, "value_0", *value)
 			}
+			assert.Equal(t, tc.loads, loadCounter.Load(), "the entry loaded by the waiting routine should be used")
 			assert.Equal(t, 1, cacheSize(c))
 			assert.Equal(t, 1, scheduleSize(c))
 		})

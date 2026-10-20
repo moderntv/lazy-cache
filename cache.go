@@ -135,15 +135,30 @@ func (c *Cache[K, T]) GetWithError(ID K) (*T, error) {
 
 // lookup returns the entry of ID, loaded or reloaded when needed; with zero
 // TTL of the load result the entry is not stored in cache. Concurrent lookups
-// of one ID load (or reload) it only once, the others wait for that load.
+// of one ID load (or reload) it only once, the others wait for that load and
+// use it - unless the entry is invalidated during the load or the load panics,
+// then one of the waiting lookups loads the entry again.
 func (c *Cache[K, T]) lookup(ID K) *cachedEntry[K, T] {
-	c.mu.RLock()
-	entry, exists := c.data[ID]
-	c.mu.RUnlock()
-
 	if c.metrics != nil {
 		c.metrics.ReadsCount.Inc()
 	}
+
+	for {
+		entry := c.lookupOnce(ID)
+		if entry != nil {
+			return entry
+		}
+		// the entry has been removed from cache while waiting for its load (e.g.
+		// the load panicked), look up the entry stored in cache now
+	}
+}
+
+// lookupOnce is lookup which returns nil when the found entry has been removed
+// from cache before it was reloaded (see reloadIfExpired)
+func (c *Cache[K, T]) lookupOnce(ID K) *cachedEntry[K, T] {
+	c.mu.RLock()
+	entry, exists := c.data[ID]
+	c.mu.RUnlock()
 
 	nowMillis := c.now()
 
@@ -188,7 +203,9 @@ func (c *Cache[K, T]) lookup(ID K) *cachedEntry[K, T] {
 
 // reloadIfExpired returns the entry found in cache, reloaded when its data are
 // expired. Concurrent callers wait for one reload (or the first load still in
-// progress) instead of reloading the entry again.
+// progress) instead of reloading the entry again. Returns nil instead of
+// reloading the entry which has been removed from cache meanwhile (e.g. its
+// first load panicked), the reload would not be stored.
 func (c *Cache[K, T]) reloadIfExpired(entry *cachedEntry[K, T], nowMillis int64) *cachedEntry[K, T] {
 	// read before the data are checked, so a load finished since then is
 	// detected after waiting for lock
@@ -211,6 +228,17 @@ func (c *Cache[K, T]) reloadIfExpired(entry *cachedEntry[K, T], nowMillis int64)
 		entry.mu.Unlock()
 
 		return entry
+	}
+
+	// check if entry is still stored in cache, it may have been removed during
+	// waiting for lock
+	c.mu.RLock()
+	stored := c.data[entry.id] == entry
+	c.mu.RUnlock()
+	if !stored {
+		entry.mu.Unlock()
+
+		return nil
 	}
 
 	// reload entry
