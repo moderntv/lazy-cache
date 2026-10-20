@@ -37,7 +37,7 @@ A watcher runs in the background. It keeps entries in a single min-heap ordered 
 -   Cached data may not reflect the current state of the underlying storage.
 -   `ReloadInterval` must be ≤ `TTL`. TTL should be at least about 2× `ReloadInterval` for smoother behavior.
 -   `GetMultiple` does **not** do single-flight (see [Batch loading](#batch-loading)).
--   A panic of `LoadOneFunc` in `Get`/`GetWithError` is passed to the caller, and routines waiting for that load load the entry again. A panic during automatic reload is recovered and logged; the entry is then reloaded by `Get` once its data expire.
+-   A panic of `LoadOneFunc` in `Get`/`GetWithError` is passed to the caller, and one of the routines waiting for that load tries to load the entry itself. A panic during automatic reload is recovered, logged and handled as a failed reload: the data are kept and the next automatic reload is planned as usual.
 
 ## Batch loading
 
@@ -101,7 +101,7 @@ When `MetricsRegistry` is set, these Prometheus metrics are registered (subsyste
 | `items_count` | Gauge | Number of cached items |
 | `automatic_loads` | Counter | Automatic reloads (reload worker) |
 | `lazy_loads` | Counter | Loads triggered by `Get` (miss or expired) |
-| `error_loads` | Counter | Loads that failed with an error other than `ErrNotFound` |
+| `error_loads` | Counter | Loads that failed with an error other than `ErrNotFound` or panicked |
 | `batch_loads` | Counter | `LoadMultipleFunc` calls (one per `GetMultiple` that had to load something) |
 | `batch_load_items` | Counter | IDs sent to `LoadMultipleFunc`; the ratio to `reads_count` is the batch hit rate |
 | `reads_count` | Counter | `Get` / `GetCached` calls, plus every ID passed to `GetMultiple` |

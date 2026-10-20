@@ -4,7 +4,6 @@ import (
 	"container/heap"
 	"math"
 	"runtime"
-	"runtime/debug"
 	"time"
 )
 
@@ -310,28 +309,13 @@ func (c *Cache[K, T]) reloadEntry(entry *cachedEntry[K, T]) {
 		return
 	}
 
-	// handle potential panic of the load (background reload should not crash
-	// running app); the entry is not planned for automatic reload anymore, it
-	// is reloaded by Get when its data expire
-	defer func() {
-		err := recover()
-		if err != nil {
-			c.log.Error().
-				Interface("err", err).
-				Interface("id", entry.id).
-				Str("stack", string(debug.Stack())).
-				Msg("panic occurred during automatic reload of entry")
-		}
-	}()
-
 	entry.mu.Lock()
 
 	nowMillis := c.now()
-	ttl, accessed, err := c.loadEntry(entry, nowMillis, false)
+	ttl, accessed := c.loadEntry(entry, nowMillis, automaticReload)
 	if !accessed {
 		ttl = -1 // do not prolong TTL for not accessed entries
 	}
 
 	c.scheduleEntry(entry, ttl, nowMillis)
-	c.countLoad(true, err)
 }

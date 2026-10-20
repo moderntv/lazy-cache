@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -55,9 +56,10 @@ func TestLoadPanicReleasesEntry(t *testing.T) {
 			loadRelease := make(chan struct{})
 
 			c, err := New(Params[int, string]{
-				Context: testContext(t),
-				Log:     test_utils.Logger(),
-				Name:    "test_load_panic_releases_entry",
+				Context:         testContext(t),
+				Log:             test_utils.Logger(),
+				MetricsRegistry: test_utils.Metrics("test_load_panic_releases_entry"),
+				Name:            "test_load_panic_releases_entry",
 				LoadOneFunc: func(ID int) (*string, error) {
 					loadCounter.Add(1)
 					if panicLoad.CompareAndSwap(true, false) {
@@ -108,6 +110,8 @@ func TestLoadPanicReleasesEntry(t *testing.T) {
 				assert.Equal(t, "value_0", *value)
 			}
 			assert.Equal(t, tc.loads, loadCounter.Load(), "the entry loaded by the waiting routine should be used")
+			assert.Equal(t, float64(tc.loads), testutil.ToFloat64(c.metrics.LazyLoadCount))
+			assert.Equal(t, float64(1), testutil.ToFloat64(c.metrics.ErrorLoadCount), "the panicked load should be counted as failed")
 			assert.Equal(t, 1, cacheSize(c))
 			assert.Equal(t, 1, scheduleSize(c))
 		})
@@ -115,16 +119,18 @@ func TestLoadPanicReleasesEntry(t *testing.T) {
 }
 
 // TestAutomaticReloadPanic checks that a panic of LoadOneFunc in the reload
-// worker does not crash the application nor leave the entry locked
+// worker does not crash the application. It is handled as a failed reload: the
+// data are kept, the error is counted and the next automatic reload is planned.
 func TestAutomaticReloadPanic(t *testing.T) {
 	t.Parallel()
 
 	loadCounter := atomic.Int64{}
 
 	c, err := New(Params[int, string]{
-		Context: testContext(t),
-		Log:     test_utils.Logger(),
-		Name:    "test_automatic_reload_panic",
+		Context:         testContext(t),
+		Log:             test_utils.Logger(),
+		MetricsRegistry: test_utils.Metrics("test_automatic_reload_panic"),
+		Name:            "test_automatic_reload_panic",
 		LoadOneFunc: func(ID int) (*string, error) {
 			// the first automatic reload panics
 			if loadCounter.Add(1) == 2 {
@@ -144,13 +150,14 @@ func TestAutomaticReloadPanic(t *testing.T) {
 
 	require.Equal(t, "value_0", *c.Get(0))
 
-	require.Eventually(t, func() bool { return loadCounter.Load() == 2 }, 5*time.Second, 10*time.Millisecond)
-	time.Sleep(250 * time.Millisecond) // let the data of the first load expire
+	// the entry is reloaded automatically again after the panic
+	require.Eventually(t, func() bool { return loadCounter.Load() >= 3 }, 5*time.Second, 10*time.Millisecond)
 
-	// the expired entry is reloaded by Get
-	value := getWithTimeout(t, c, 0)
+	value, err := c.GetWithError(0)
 	if assert.NotNil(t, value) {
 		assert.Equal(t, "value_0", *value)
 	}
-	assert.Equal(t, int64(3), loadCounter.Load())
+	assert.NoError(t, err)
+	assert.Equal(t, float64(1), testutil.ToFloat64(c.metrics.ErrorLoadCount), "the panicked load should be counted as failed")
+	assert.GreaterOrEqual(t, testutil.ToFloat64(c.metrics.AutomaticLoadCount), float64(2))
 }

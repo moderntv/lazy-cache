@@ -3,6 +3,8 @@ package lazy
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -184,7 +186,7 @@ func (c *Cache[K, T]) lookupOnce(ID K) *cachedEntry[K, T] {
 	c.storeEntryLocked(entry)
 	c.mu.Unlock()
 
-	ttl, _, err := c.loadEntry(entry, nowMillis, true)
+	ttl, _ := c.loadEntry(entry, nowMillis, firstLoad)
 
 	// do not store into cache when TTL is 0
 	if ttl == 0 {
@@ -196,7 +198,6 @@ func (c *Cache[K, T]) lookupOnce(ID K) *cachedEntry[K, T] {
 	}
 
 	c.scheduleEntry(entry, ttl, nowMillis)
-	c.countLoad(false, err)
 
 	return entry
 }
@@ -242,54 +243,90 @@ func (c *Cache[K, T]) reloadIfExpired(entry *cachedEntry[K, T], nowMillis int64)
 	}
 
 	// reload entry
-	ttl, _, err := c.loadEntry(entry, nowMillis, false)
-
+	ttl, _ := c.loadEntry(entry, nowMillis, lazyReload)
 	c.scheduleEntry(entry, ttl, nowMillis)
-	c.countLoad(false, err)
 
 	return entry
 }
 
-// loadEntry loads data of the entry locked by the caller and unlocks it.
-// Returns TTL of the loaded data (see cachedEntry.set), whether the entry data
-// were accessed since the previous load and the load error.
+// loadKind tells why an entry is loaded
+type loadKind int
+
+const (
+	firstLoad       loadKind = iota // by Get of the entry missing in cache
+	lazyReload                      // by Get of the expired entry
+	automaticReload                 // by the reload worker
+)
+
+// loadEntry loads data of the entry locked by the caller, unlocks it and
+// updates metrics. Returns TTL of the loaded data (see cachedEntry.set) and
+// whether the entry data were accessed since the previous load.
 //
-// When LoadOneFunc panics, the entry is unlocked too, so routines waiting for
-// it do not block forever, and the panic is passed on. The entry of the first
-// load has no data then, it is removed from cache (it would stay there without
-// TTL otherwise).
-func (c *Cache[K, T]) loadEntry(entry *cachedEntry[K, T], nowMillis int64, init bool) (ttl time.Duration, accessed bool, err error) {
+// A panic of LoadOneFunc in automatic reload is recovered and handled as a
+// failed load, there is no caller to pass it to. Otherwise the panic is passed
+// on to the caller of Get, the entry is unlocked though, so routines waiting
+// for it do not block forever. The entry of the first load has no data then,
+// it is removed from cache (it would stay there without TTL otherwise).
+func (c *Cache[K, T]) loadEntry(entry *cachedEntry[K, T], nowMillis int64, kind loadKind) (ttl time.Duration, accessed bool) {
 	loaded := false
 	defer func() {
-		if !loaded && init {
-			c.mu.Lock()
-			c.deleteEntryLocked(entry)
-			c.mu.Unlock()
+		if !loaded {
+			c.countLoad(kind, errLoadPanicked)
+			if kind == firstLoad {
+				c.mu.Lock()
+				c.deleteEntryLocked(entry)
+				c.mu.Unlock()
+			}
 		}
 
 		entry.mu.Unlock()
 	}()
 
+	load := c.loadOneFunc
+	if kind == automaticReload {
+		load = c.loadOneRecovered
+	}
+
 	invalidations := entry.invalidations.Load()
-	loadedValue, err := c.loadOneFunc(entry.id)
+	loadedValue, err := load(entry.id)
 	loaded = true
 	accessed = entry.accessed.Load()
-	ttl = entry.set(loadedValue, err, nowMillis, &c.timeouts, init)
+	ttl = entry.set(loadedValue, err, nowMillis, &c.timeouts, kind == firstLoad)
 	entry.expireIfInvalidated(invalidations)
 	entry.loadInvalidations = invalidations
 	entry.loads.Add(1)
+	c.countLoad(kind, err)
 
-	return ttl, accessed, err
+	return ttl, accessed
 }
 
-// countLoad updates metrics after a load of one entry, lazy (by Get) or
-// automatic (by the reload worker)
-func (c *Cache[K, T]) countLoad(automatic bool, err error) {
+// loadOneRecovered calls LoadOneFunc and returns its panic as an error, so a
+// panic in the reload worker does not crash the application
+func (c *Cache[K, T]) loadOneRecovered(ID K) (value *T, err error) {
+	defer func() {
+		recovered := recover()
+		if recovered != nil {
+			c.log.Error().
+				Interface("err", recovered).
+				Interface("id", ID).
+				Str("stack", string(debug.Stack())).
+				Msg("panic occurred during automatic reload of entry")
+
+			value = nil
+			err = fmt.Errorf("%w: %v", errLoadPanicked, recovered)
+		}
+	}()
+
+	return c.loadOneFunc(ID)
+}
+
+// countLoad updates metrics after a load of one entry
+func (c *Cache[K, T]) countLoad(kind loadKind, err error) {
 	if c.metrics == nil {
 		return
 	}
 
-	if automatic {
+	if kind == automaticReload {
 		c.metrics.AutomaticLoadCount.Inc()
 	} else {
 		c.metrics.LazyLoadCount.Inc()

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -50,9 +51,10 @@ func TestGetMissingEntryConcurrentLoad(t *testing.T) {
 			routines := 10
 
 			c, err := New(Params[int, string]{
-				Context: testContext(t),
-				Log:     test_utils.Logger(),
-				Name:    "test_get_missing_entry_concurrent_load",
+				Context:         testContext(t),
+				Log:             test_utils.Logger(),
+				MetricsRegistry: test_utils.Metrics("test_get_missing_entry_concurrent_load"),
+				Name:            "test_get_missing_entry_concurrent_load",
 				LoadOneFunc: func(ID int) (*string, error) {
 					loadCounter.Add(1)
 					// keep the load in progress until all the other routines wait for it
@@ -96,6 +98,7 @@ func TestGetMissingEntryConcurrentLoad(t *testing.T) {
 			wg.Wait()
 
 			assert.Equal(t, int64(1), loadCounter.Load(), "the missing entry should be loaded only once")
+			assert.Equal(t, float64(1), testutil.ToFloat64(c.metrics.LazyLoadCount), "the load should be counted (also with zero TTL)")
 			for _, r := range results {
 				if tc.loadErr != nil {
 					assert.Nil(t, r.value)
