@@ -3,6 +3,8 @@ package lazy
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -134,69 +136,57 @@ func (c *Cache[K, T]) GetWithError(ID K) (*T, error) {
 }
 
 // lookup returns the entry of ID, loaded or reloaded when needed; with zero
-// TTL of the load result the entry is not stored in cache
+// TTL of the load result the entry is not stored in cache. Concurrent lookups
+// of one ID load (or reload) it only once, the others wait for that load and
+// use it - unless the entry is invalidated during the load or the load panics,
+// then one of the waiting lookups loads the entry again.
 func (c *Cache[K, T]) lookup(ID K) *cachedEntry[K, T] {
-	c.mu.RLock()
-	entry, exists := c.data[ID]
-	c.mu.RUnlock()
-
 	if c.metrics != nil {
 		c.metrics.ReadsCount.Inc()
 	}
+
+	for {
+		entry := c.lookupOnce(ID)
+		if entry != nil {
+			return entry
+		}
+		// the entry has been removed from cache while waiting for its load (e.g.
+		// the load panicked), look up the entry stored in cache now
+	}
+}
+
+// lookupOnce is lookup which returns nil when the found entry has been removed
+// from cache before it was reloaded (see reloadIfExpired)
+func (c *Cache[K, T]) lookupOnce(ID K) *cachedEntry[K, T] {
+	c.mu.RLock()
+	entry, exists := c.data[ID]
+	c.mu.RUnlock()
 
 	nowMillis := c.now()
 
 	// entry found in cache
 	if exists {
-		// valid value
-		if nowMillis < entry.nextReload.Load() {
-			return entry
-		}
-
-		// data are expired, check if entry is being reloaded
-		entry.mu.Lock()
-
-		// check if entry was loaded by other routine during waiting for lock
-		if nowMillis < entry.nextReload.Load() {
-			entry.mu.Unlock()
-
-			return entry
-		}
-
-		// reload entry
-		invalidations := entry.invalidations.Load()
-		loadedValue, err := c.loadOneFunc(ID)
-		ttl := entry.set(loadedValue, err, nowMillis, &c.timeouts, false)
-		entry.expireIfInvalidated(invalidations)
-
-		entry.mu.Unlock()
-
-		c.scheduleEntry(entry, ttl, nowMillis)
-
-		if c.metrics != nil {
-			c.metrics.LazyLoadCount.Inc()
-			if err != nil && !errors.Is(err, ErrNotFound) {
-				c.metrics.ErrorLoadCount.Inc()
-			}
-		}
-
-		return entry
+		return c.reloadIfExpired(entry, nowMillis)
 	}
 
 	// not found in cache
+	c.mu.Lock()
+	// other routine may have stored the entry since the read lock was released,
+	// then wait for its load instead of loading the entry again
+	entry, exists = c.data[ID]
+	if exists {
+		c.mu.Unlock()
+
+		return c.reloadIfExpired(entry, nowMillis)
+	}
+	// the entry is locked before it is visible to other routines, so they wait
+	// for its load
 	entry = newCachedEntry[K, T](ID)
 	entry.mu.Lock()
-
-	c.mu.Lock()
 	c.storeEntryLocked(entry)
 	c.mu.Unlock()
 
-	invalidations := entry.invalidations.Load()
-	loadedValue, err := c.loadOneFunc(ID)
-	ttl := entry.set(loadedValue, err, nowMillis, &c.timeouts, true)
-	entry.expireIfInvalidated(invalidations)
-
-	entry.mu.Unlock()
+	ttl, _ := c.loadEntry(entry, nowMillis, firstLoad)
 
 	// do not store into cache when TTL is 0
 	if ttl == 0 {
@@ -209,14 +199,141 @@ func (c *Cache[K, T]) lookup(ID K) *cachedEntry[K, T] {
 
 	c.scheduleEntry(entry, ttl, nowMillis)
 
-	if c.metrics != nil {
-		c.metrics.LazyLoadCount.Inc()
-		if err != nil && !errors.Is(err, ErrNotFound) {
-			c.metrics.ErrorLoadCount.Inc()
-		}
+	return entry
+}
+
+// reloadIfExpired returns the entry found in cache, reloaded when its data are
+// expired. Concurrent callers wait for one reload (or the first load still in
+// progress) instead of reloading the entry again. Returns nil instead of
+// reloading the entry which has been removed from cache meanwhile (e.g. its
+// first load panicked), the reload would not be stored.
+func (c *Cache[K, T]) reloadIfExpired(entry *cachedEntry[K, T], nowMillis int64) *cachedEntry[K, T] {
+	// read before the data are checked, so a load finished since then is
+	// detected after waiting for lock
+	loads := entry.loads.Load()
+
+	// valid value
+	if nowMillis < entry.nextReload.Load() {
+		return entry
 	}
 
+	// data are expired, check if entry is being reloaded
+	entry.mu.Lock()
+
+	// check if entry was loaded by other routine during waiting for lock; data
+	// loaded meanwhile are used even when they are already due for reload (e.g.
+	// the first reload spread right after the load), unless the entry has been
+	// invalidated since the load started
+	if nowMillis < entry.nextReload.Load() ||
+		(entry.loads.Load() != loads && entry.invalidations.Load() == entry.loadInvalidations) {
+		entry.mu.Unlock()
+
+		return entry
+	}
+
+	// check if entry is still stored in cache, it may have been removed during
+	// waiting for lock
+	c.mu.RLock()
+	stored := c.data[entry.id] == entry
+	c.mu.RUnlock()
+	if !stored {
+		entry.mu.Unlock()
+
+		return nil
+	}
+
+	// reload entry
+	ttl, _ := c.loadEntry(entry, nowMillis, lazyReload)
+	c.scheduleEntry(entry, ttl, nowMillis)
+
 	return entry
+}
+
+// loadKind tells why an entry is loaded
+type loadKind int
+
+const (
+	firstLoad       loadKind = iota // by Get of the entry missing in cache
+	lazyReload                      // by Get of the expired entry
+	automaticReload                 // by the reload worker
+)
+
+// loadEntry loads data of the entry locked by the caller, unlocks it and
+// updates metrics. Returns TTL of the loaded data (see cachedEntry.set) and
+// whether the entry data were accessed since the previous load.
+//
+// A panic of LoadOneFunc in automatic reload is recovered and handled as a
+// failed load, there is no caller to pass it to. Otherwise the panic is passed
+// on to the caller of Get, the entry is unlocked though, so routines waiting
+// for it do not block forever. The entry of the first load has no data then,
+// it is removed from cache (it would stay there without TTL otherwise).
+func (c *Cache[K, T]) loadEntry(entry *cachedEntry[K, T], nowMillis int64, kind loadKind) (ttl time.Duration, accessed bool) {
+	loaded := false
+	defer func() {
+		if !loaded {
+			c.countLoad(kind, errLoadPanicked)
+			if kind == firstLoad {
+				c.mu.Lock()
+				c.deleteEntryLocked(entry)
+				c.mu.Unlock()
+			}
+		}
+
+		entry.mu.Unlock()
+	}()
+
+	load := c.loadOneFunc
+	if kind == automaticReload {
+		load = c.loadOneRecovered
+	}
+
+	invalidations := entry.invalidations.Load()
+	loadedValue, err := load(entry.id)
+	loaded = true
+	accessed = entry.accessed.Load()
+	ttl = entry.set(loadedValue, err, nowMillis, &c.timeouts, kind == firstLoad)
+	entry.expireIfInvalidated(invalidations)
+	entry.loadInvalidations = invalidations
+	entry.loads.Add(1)
+	c.countLoad(kind, err)
+
+	return ttl, accessed
+}
+
+// loadOneRecovered calls LoadOneFunc and returns its panic as an error, so a
+// panic in the reload worker does not crash the application
+func (c *Cache[K, T]) loadOneRecovered(ID K) (value *T, err error) {
+	defer func() {
+		recovered := recover()
+		if recovered != nil {
+			c.log.Error().
+				Interface("err", recovered).
+				Interface("id", ID).
+				Str("stack", string(debug.Stack())).
+				Msg("panic occurred during automatic reload of entry")
+
+			value = nil
+			err = fmt.Errorf("%w: %v", errLoadPanicked, recovered)
+		}
+	}()
+
+	return c.loadOneFunc(ID)
+}
+
+// countLoad updates metrics after a load of one entry
+func (c *Cache[K, T]) countLoad(kind loadKind, err error) {
+	if c.metrics == nil {
+		return
+	}
+
+	if kind == automaticReload {
+		c.metrics.AutomaticLoadCount.Inc()
+	} else {
+		c.metrics.LazyLoadCount.Inc()
+	}
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		c.metrics.ErrorLoadCount.Inc()
+	}
 }
 
 // GetMultiple returns values for the given IDs. Entries which are still valid

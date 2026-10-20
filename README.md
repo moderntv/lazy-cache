@@ -37,6 +37,7 @@ A watcher runs in the background. It keeps entries in a single min-heap ordered 
 -   Cached data may not reflect the current state of the underlying storage.
 -   `ReloadInterval` must be ≤ `TTL`. TTL should be at least about 2× `ReloadInterval` for smoother behavior.
 -   `GetMultiple` does **not** do single-flight (see [Batch loading](#batch-loading)).
+-   A panic of `LoadOneFunc` in `Get`/`GetWithError` is passed to the caller, and one of the routines waiting for that load tries to load the entry itself. A panic during automatic reload is recovered, logged and handled as a failed reload: the data are kept and the next automatic reload is planned as usual.
 
 ## Batch loading
 
@@ -45,7 +46,7 @@ A watcher runs in the background. It keeps entries in a single min-heap ordered 
 Two things are worth knowing before using it:
 
 -   **The loader does not have to return an entry for every requested ID.** IDs missing from its result are stored as not-found by the cache itself (for `NotFoundTTL`), so the next `GetMultiple` does not ask for them again. Without this, sparse batches would hit the storage on every call.
--   **`GetMultiple` does not do single-flight.** Unlike `Get`, which serializes concurrent reloads of one key on that entry's mutex, two concurrent batches sharing an ID — or a batch running concurrently with `Get` of the same ID — load that entry more than once. Both loads store the same value, so the only cost is a redundant load. Preloading behaves the same way.
+-   **`GetMultiple` does not do single-flight.** Unlike `Get`, which serializes concurrent loads and reloads of one key on that entry's mutex, two concurrent batches sharing an ID — or a batch running concurrently with `Get` of the same ID — load that entry more than once. Both loads store the same value, so the only cost is a redundant load. Preloading behaves the same way.
 
 Loaded entries go through the same path as preloaded ones, so `TTL`, `NotFoundTTL`, `ErrorTTL`, `Randomizer`, TTL eviction and automatic reload apply as usual. An entry that already exists in cache is not overwritten by a failed load (errors other than `ErrNotFound`).
 
@@ -100,7 +101,7 @@ When `MetricsRegistry` is set, these Prometheus metrics are registered (subsyste
 | `items_count` | Gauge | Number of cached items |
 | `automatic_loads` | Counter | Automatic reloads (reload worker) |
 | `lazy_loads` | Counter | Loads triggered by `Get` (miss or expired) |
-| `error_loads` | Counter | Loads that failed with an error other than `ErrNotFound` |
+| `error_loads` | Counter | Loads that failed with an error other than `ErrNotFound` or panicked |
 | `batch_loads` | Counter | `LoadMultipleFunc` calls (one per `GetMultiple` that had to load something) |
 | `batch_load_items` | Counter | IDs sent to `LoadMultipleFunc`; the ratio to `reads_count` is the batch hit rate |
 | `reads_count` | Counter | `Get` / `GetCached` calls, plus every ID passed to `GetMultiple` |
