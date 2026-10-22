@@ -77,6 +77,12 @@ func New[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
 		watcherWakeAt:       noDeadline,
 	}
 
+	if c.automaticReloadType == AutomaticReloadDisabled {
+		// entries are reloaded on access, spreading would only make their
+		// first reloads (synchronous in Get) come earlier
+		c.timeouts.DisableSpreadInitialReload = true
+	}
+
 	if params.PreloadChan != nil {
 		c.preloadWG = &sync.WaitGroup{}
 		c.preloadWG.Add(1)

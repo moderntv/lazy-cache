@@ -37,8 +37,9 @@ type Timeouts struct {
 
 	// ReloadInterval specifies how often the entry should be reloaded or how
 	// long its data are valid in cache.
-	// The duration is being randomized by `Randomizer`. The first reload of
-	// the entry is spread, so data of the first load can be kept up to
+	// The duration is being randomized by `Randomizer`. With automatic
+	// reload, the first reload of the entry is spread, so data of the first
+	// load can be kept up to
 	// (1 + 2 * `Randomizer`) * `ReloadInterval` (see
 	// `DisableSpreadInitialReload`).
 	// With automatic reload, entries are reloaded at 0.9 of the planned time.
@@ -51,16 +52,20 @@ type Timeouts struct {
 	ReloadInterval time.Duration `mapstructure:"reload_interval"`
 
 	// DisableSpreadInitialReload disables spreading of the first reloads.
+	// Spreading applies only with automatic reload; with
+	// `AutomaticReloadDisabled` it is always disabled, because entries are
+	// reloaded on access and spreading would only make their first reloads
+	// (synchronous in `Get`) come earlier.
 	// By default, the first reload after the first successful load of an
 	// entry (preloading, `Get` of an entry missing in cache, `GetMultiple`)
 	// is planned after `Randomizer` * `ReloadInterval` plus the random time
 	// to the next reload of an entry kept in cache for a long time.
 	// Entries loaded at once (e.g. by preloading) are thus not reloaded for
-	// `Randomizer` * `ReloadInterval` (0.9 of it with automatic reload), so
-	// just loaded data are not reloaded right away, and then at a constant
-	// rate, the same as in a long running cache, instead of in waves (e.g.
-	// all of them waiting the whole `ReloadInterval` and then being reloaded
-	// at once).
+	// 0.9 * `Randomizer` * `ReloadInterval` (automatic reload runs at 0.9 of
+	// the planned time), so just loaded data are not reloaded right away,
+	// and then at a constant rate, the same as in a long running cache,
+	// instead of in waves (e.g. all of them waiting the whole
+	// `ReloadInterval` and then being reloaded at once).
 	// The first reload is planned uniformly up to `ReloadInterval`, the
 	// remaining `Randomizer` part of entries less and less likely up to
 	// (1 + 2 * `Randomizer`) * `ReloadInterval`, which is

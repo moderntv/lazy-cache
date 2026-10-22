@@ -21,7 +21,12 @@ func spreadTestValue(ID int) *string {
 	return test_utils.StringPointer("value_" + strconv.Itoa(ID))
 }
 
-func newSpreadTestCache(t *testing.T, timeouts Timeouts, preload <-chan LoadedEntry[int, string]) *Cache[int, string] {
+func newSpreadTestCache(
+	t *testing.T,
+	timeouts Timeouts,
+	automaticReload AutomaticReload,
+	preload <-chan LoadedEntry[int, string],
+) *Cache[int, string] {
 	c, err := New(Params[int, string]{
 		Context: testContext(t),
 		Log:     test_utils.Logger(),
@@ -37,7 +42,7 @@ func newSpreadTestCache(t *testing.T, timeouts Timeouts, preload <-chan LoadedEn
 		},
 		Timeouts:        timeouts,
 		PreloadChan:     preload,
-		AutomaticReload: AutomaticReloadDisabled,
+		AutomaticReload: automaticReload,
 	})
 	require.NoError(t, err)
 
@@ -46,29 +51,29 @@ func newSpreadTestCache(t *testing.T, timeouts Timeouts, preload <-chan LoadedEn
 
 // spreadTestFirstLoads load all test entries at once into a new cache, each by
 // another path which loads entries for the first time
-var spreadTestFirstLoads = map[string]func(t *testing.T, timeouts Timeouts) *Cache[int, string]{
-	"preload": func(t *testing.T, timeouts Timeouts) *Cache[int, string] {
+var spreadTestFirstLoads = map[string]func(t *testing.T, timeouts Timeouts, automaticReload AutomaticReload) *Cache[int, string]{
+	"preload": func(t *testing.T, timeouts Timeouts, automaticReload AutomaticReload) *Cache[int, string] {
 		preload := make(chan LoadedEntry[int, string], spreadTestEntries)
 		for ID := range spreadTestEntries {
 			preload <- LoadedEntry[int, string]{ID: ID, Value: spreadTestValue(ID)}
 		}
 		close(preload)
 
-		c := newSpreadTestCache(t, timeouts, preload)
+		c := newSpreadTestCache(t, timeouts, automaticReload, preload)
 		c.Ready()
 
 		return c
 	},
-	"get": func(t *testing.T, timeouts Timeouts) *Cache[int, string] {
-		c := newSpreadTestCache(t, timeouts, nil)
+	"get": func(t *testing.T, timeouts Timeouts, automaticReload AutomaticReload) *Cache[int, string] {
+		c := newSpreadTestCache(t, timeouts, automaticReload, nil)
 		for ID := range spreadTestEntries {
 			require.Equal(t, spreadTestValue(ID), c.Get(ID))
 		}
 
 		return c
 	},
-	"get_multiple": func(t *testing.T, timeouts Timeouts) *Cache[int, string] {
-		c := newSpreadTestCache(t, timeouts, nil)
+	"get_multiple": func(t *testing.T, timeouts Timeouts, automaticReload AutomaticReload) *Cache[int, string] {
+		c := newSpreadTestCache(t, timeouts, automaticReload, nil)
 		IDs := make([]int, 0, spreadTestEntries)
 		for ID := range spreadTestEntries {
 			IDs = append(IDs, ID)
@@ -99,46 +104,40 @@ func spreadTestEntryTimes(t *testing.T, c *Cache[int, string], ID int) (nextRelo
 // (1 + 2 * Randomizer) * ReloadInterval, their TTL does not end before the
 // first reload
 func TestCacheSpreadInitialReload(t *testing.T) {
-	// cache time starts at 0 when the cache is created, ReloadInterval is 3s
-	// and TTL 7s; next reloads are expected in
-	// [minNextReload, loadedAt + maxReloadIn), half of them before split and
-	// some from late, after the window [Randomizer * ReloadInterval,
-	// (1 + Randomizer) * ReloadInterval) of the former uniform spread
+	// spreading needs automatic reload; the intervals are long, so no
+	// automatic reload runs during the test
+	timeouts := cacheTestTimeouts
+	timeouts.ReloadInterval = time.Hour
+	timeouts.TTL = 3 * time.Hour
+	reloadInterval := float64(timeouts.ReloadInterval.Milliseconds())
+	ttl := float64(timeouts.TTL.Milliseconds())
+
+	// half of next reloads are expected before split (part of ReloadInterval)
 	tests := map[string]struct {
-		randomizer    float64
-		minNextReload int64
-		maxReloadIn   int64
-		split         int64
-		late          int64 // 0 means not checked
-		minTTL        int64
-		maxTTL        int64
+		randomizer float64
+		split      float64
 	}{
-		"without_randomizer": {
-			randomizer:    0,
-			minNextReload: 0,
-			maxReloadIn:   3000,
-			split:         1500,
-			minTTL:        7000,
-			maxTTL:        7000,
-		},
-		"randomizer": {
-			randomizer:    0.5,
-			minNextReload: 1500,
-			maxReloadIn:   6000,
-			split:         3000,
-			late:          4500,
-			minTTL:        3500,
-			maxTTL:        10500,
-		},
+		"without_randomizer": {randomizer: 0, split: 0.5},
+		"randomizer":         {randomizer: 0.5, split: 1},
 	}
 
 	for name, tc := range tests {
-		timeouts := cacheTestTimeouts
 		timeouts.Randomizer = tc.randomizer
+
+		// cache time starts at 0 when the cache is created; next reloads are
+		// expected in [minNextReload, loadedAt + maxReloadIn) and some of them
+		// from late, after the window [Randomizer * ReloadInterval,
+		// (1 + Randomizer) * ReloadInterval) of the former uniform spread
+		minNextReload := int64(reloadInterval * tc.randomizer)
+		maxReloadIn := int64(reloadInterval * (1 + 2*tc.randomizer))
+		split := int64(reloadInterval * tc.split)
+		late := int64(reloadInterval * (1 + tc.randomizer))
+		minTTL := int64(ttl * (1 - tc.randomizer))
+		maxTTL := int64(ttl * (1 + tc.randomizer))
 
 		for firstLoadName, firstLoad := range spreadTestFirstLoads {
 			t.Run(name+"/"+firstLoadName, func(t *testing.T) {
-				c := firstLoad(t, timeouts)
+				c := firstLoad(t, timeouts, AutomaticReloadAccessedEntries)
 				loadedAt := c.now()
 
 				reloadOutOfRange := 0
@@ -151,74 +150,84 @@ func TestCacheSpreadInitialReload(t *testing.T) {
 				for ID := range spreadTestEntries {
 					nextReload, expiresAt := spreadTestEntryTimes(t, c, ID)
 
-					if expiresAt < tc.minTTL || expiresAt > loadedAt+tc.maxTTL {
+					if expiresAt < minTTL || expiresAt > loadedAt+maxTTL {
 						ttlOutOfRange++
 					}
 					if expiresAt < nextReload {
 						expiresBeforeReload++
 					}
-					if tc.late > 0 && nextReload >= tc.late {
+					if nextReload >= loadedAt+late {
 						lateReloads++
 					}
 
-					if nextReload < tc.minNextReload || nextReload >= loadedAt+tc.maxReloadIn {
+					if nextReload < minNextReload || nextReload >= loadedAt+maxReloadIn {
 						reloadOutOfRange++
-					} else if nextReload < tc.split {
+					} else if nextReload < split {
 						firstHalf++
 					} else {
 						secondHalf++
 					}
 				}
 
-				t.Logf("next reloads before %d: %d", tc.split, firstHalf)
-				t.Logf("next reloads from %d: %d", tc.split, secondHalf)
+				t.Logf("next reloads before %d: %d", split, firstHalf)
+				t.Logf("next reloads from %d: %d", split, secondHalf)
 
-				assert.Zero(t, reloadOutOfRange, "next reloads out of [%d, loadedAt + %d)", tc.minNextReload, tc.maxReloadIn)
-				assert.Zero(t, ttlOutOfRange, "TTL evictions out of [%d, loadedAt + %d]", tc.minTTL, tc.maxTTL)
+				assert.Zero(t, reloadOutOfRange, "next reloads out of [%d, loadedAt + %d)", minNextReload, maxReloadIn)
+				assert.Zero(t, ttlOutOfRange, "TTL evictions out of [%d, loadedAt + %d]", minTTL, maxTTL)
 				assert.Zero(t, expiresBeforeReload, "TTL evictions before the first reload")
 				assert.Greater(t, firstHalf, spreadTestEntries/4)
 				assert.Greater(t, secondHalf, spreadTestEntries/4)
-				if tc.late > 0 {
-					t.Logf("next reloads from %d: %d", tc.late, lateReloads)
-					assert.Positive(t, lateReloads, "no next reloads from %d", tc.late)
+				if tc.randomizer > 0 {
+					t.Logf("next reloads from loadedAt + %d: %d", late, lateReloads)
+					assert.Positive(t, lateReloads, "no next reloads from loadedAt + %d", late)
 				}
 			})
 		}
 	}
 }
 
-// With DisableSpreadInitialReload all entries loaded at once are reloaded
-// after ReloadInterval
+// With DisableSpreadInitialReload, or without automatic reload, all entries
+// loaded at once are reloaded after ReloadInterval
 func TestCacheSpreadInitialReloadDisabled(t *testing.T) {
-	timeouts := cacheTestTimeouts
-	timeouts.DisableSpreadInitialReload = true
+	tests := map[string]struct {
+		disableSpread   bool
+		automaticReload AutomaticReload
+	}{
+		"disabled":                  {disableSpread: true, automaticReload: AutomaticReloadAccessedEntries},
+		"automatic_reload_disabled": {disableSpread: false, automaticReload: AutomaticReloadDisabled},
+	}
 
 	// cache time starts at 0 when the cache is created
-	reloadInterval := timeouts.ReloadInterval.Milliseconds()
-	ttl := timeouts.TTL.Milliseconds()
+	reloadInterval := cacheTestTimeouts.ReloadInterval.Milliseconds()
+	ttl := cacheTestTimeouts.TTL.Milliseconds()
 
-	for name, firstLoad := range spreadTestFirstLoads {
-		t.Run(name, func(t *testing.T) {
-			c := firstLoad(t, timeouts)
-			loadedAt := c.now()
+	for name, tc := range tests {
+		timeouts := cacheTestTimeouts
+		timeouts.DisableSpreadInitialReload = tc.disableSpread
 
-			reloadOutOfRange := 0
-			ttlOutOfRange := 0
+		for firstLoadName, firstLoad := range spreadTestFirstLoads {
+			t.Run(name+"/"+firstLoadName, func(t *testing.T) {
+				c := firstLoad(t, timeouts, tc.automaticReload)
+				loadedAt := c.now()
 
-			for ID := range spreadTestEntries {
-				nextReload, expiresAt := spreadTestEntryTimes(t, c, ID)
+				reloadOutOfRange := 0
+				ttlOutOfRange := 0
 
-				if nextReload < reloadInterval || nextReload > loadedAt+reloadInterval {
-					reloadOutOfRange++
+				for ID := range spreadTestEntries {
+					nextReload, expiresAt := spreadTestEntryTimes(t, c, ID)
+
+					if nextReload < reloadInterval || nextReload > loadedAt+reloadInterval {
+						reloadOutOfRange++
+					}
+					if expiresAt < ttl || expiresAt > loadedAt+ttl {
+						ttlOutOfRange++
+					}
 				}
-				if expiresAt < ttl || expiresAt > loadedAt+ttl {
-					ttlOutOfRange++
-				}
-			}
 
-			assert.Zero(t, reloadOutOfRange, "next reloads out of [ReloadInterval, loadedAt + ReloadInterval]")
-			assert.Zero(t, ttlOutOfRange, "TTL evictions out of [TTL, loadedAt + TTL]")
-		})
+				assert.Zero(t, reloadOutOfRange, "next reloads out of [ReloadInterval, loadedAt + ReloadInterval]")
+				assert.Zero(t, ttlOutOfRange, "TTL evictions out of [TTL, loadedAt + TTL]")
+			})
+		}
 	}
 }
 
@@ -229,7 +238,8 @@ func TestCacheReloadAfterSpreadInitialReload(t *testing.T) {
 	timeouts.ReloadInterval = 300 * time.Millisecond
 	reloadInterval := timeouts.ReloadInterval.Milliseconds()
 
-	c := spreadTestFirstLoads["preload"](t, timeouts)
+	// automatic reload skips preloaded entries, they are not accessed
+	c := spreadTestFirstLoads["preload"](t, timeouts, AutomaticReloadAccessedEntries)
 
 	// all spread reloads are due
 	time.Sleep(timeouts.ReloadInterval)
