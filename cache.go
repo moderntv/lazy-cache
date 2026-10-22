@@ -100,6 +100,19 @@ func New[K comparable, T any](params Params[K, T]) (c *Cache[K, T], err error) {
 				Msg("combination of automatic reload interval is too short, setting to minimum default value")
 		}
 
+		// the spread first reload extends TTL by itself (see cachedEntry.set)
+		shortestTTL := time.Duration(float64(params.Timeouts.TTL) * (1 - params.Timeouts.Randomizer))
+		latestReload := time.Duration(
+			float64(params.Timeouts.ReloadInterval) *
+				(1 + params.Timeouts.Randomizer) *
+				automaticReloadIntervalFraction)
+		if shortestTTL < latestReload {
+			c.log.Warn().
+				Dur("shortestTTL", shortestTTL).
+				Dur("latestReload", latestReload).
+				Msg("TTL is shorter than the automatic reload interval, accessed entries can expire before their reload")
+		}
+
 		go c.startReloadWorker()
 
 	} else {

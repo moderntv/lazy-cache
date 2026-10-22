@@ -78,10 +78,13 @@ func TestEntrySetFirstTime(t *testing.T) {
 	}
 }
 
-// First successful set plans the reload at a random time from a window as wide
-// as ReloadInterval, shifted by Randomizer part of ReloadInterval
+// First successful set plans the reload after Randomizer part of
+// ReloadInterval plus utils.RandomResidualDuration: uniformly up to
+// ReloadInterval, the remaining Randomizer part of reloads less and less
+// likely up to (1 + 2 * Randomizer) * ReloadInterval
 func TestEntrySetFirstTimeSpreadsReload(t *testing.T) {
 	var nowMillis int64 = 1700000000
+	reloadInterval := entryTestTimeouts.ReloadInterval.Milliseconds()
 
 	// ReloadInterval is 3s, reload is expected in
 	// [nowMillis + minReloadIn, nowMillis + maxReloadIn)
@@ -91,7 +94,7 @@ func TestEntrySetFirstTimeSpreadsReload(t *testing.T) {
 		maxReloadIn int64
 	}{
 		"without_randomizer": {randomizer: 0, minReloadIn: 0, maxReloadIn: 3000},
-		"randomizer":         {randomizer: 0.2, minReloadIn: 600, maxReloadIn: 3600},
+		"randomizer":         {randomizer: 0.2, minReloadIn: 600, maxReloadIn: 4200},
 	}
 
 	for name, tc := range tests {
@@ -99,35 +102,44 @@ func TestEntrySetFirstTimeSpreadsReload(t *testing.T) {
 			timeouts := entryTestTimeouts
 			timeouts.Randomizer = tc.randomizer
 
-			tries := 10000
-			treshhold := 2000
+			tries := 100000
+			delta := float64(tries) / 100
 
 			outOfRange := 0
-			quarters := [4]int{}
+			uniformHalves := [2]int{}
+			afterReloadInterval := 0
 
 			for i := 0; i < tries; i++ {
 				e := newCachedEntry[int, string](0)
 				_ = e.set(test_utils.StringPointer("value1"), nil, nowMillis, &timeouts, true)
 
 				reloadIn := e.nextReload.Load() - nowMillis
-				if reloadIn < tc.minReloadIn || reloadIn >= tc.maxReloadIn {
+				switch {
+				case reloadIn < tc.minReloadIn || reloadIn >= tc.maxReloadIn:
 					outOfRange++
-					continue
+				case reloadIn >= reloadInterval:
+					afterReloadInterval++
+				default:
+					uniformHalves[(reloadIn-tc.minReloadIn)*2/(reloadInterval-tc.minReloadIn)]++
 				}
-				quarters[(reloadIn-tc.minReloadIn)*4/(tc.maxReloadIn-tc.minReloadIn)]++
 			}
 
-			t.Logf("nextReload in quarters of the window: %v", quarters)
+			t.Logf("nextReload in halves of [now + %d, now + ReloadInterval): %v", tc.minReloadIn, uniformHalves)
+			t.Logf("nextReload after now + ReloadInterval: %d", afterReloadInterval)
 
 			assert.Zero(t, outOfRange, "nextReload out of [now + %d, now + %d)", tc.minReloadIn, tc.maxReloadIn)
-			for i, count := range quarters {
-				assert.Greater(t, count, treshhold, "nextReload in quarter %d of the window", i)
+			for i, count := range uniformHalves {
+				assert.InDelta(t, float64(tries)*(1-tc.randomizer)/2, count, delta,
+					"nextReload in half %d of [now + %d, now + ReloadInterval)", i, tc.minReloadIn)
 			}
+			assert.InDelta(t, float64(tries)*tc.randomizer, afterReloadInterval, delta,
+				"nextReload after now + ReloadInterval")
 		})
 	}
 }
 
-// Spreading of the first reload does not affect TTL nor the loaded value
+// Spreading of the first reload does not affect TTL which ends after the
+// spread reload nor the loaded value
 func TestEntrySetFirstTimeSpreadKeepsTTL(t *testing.T) {
 	var nowMillis int64 = 1700000000
 
@@ -138,6 +150,44 @@ func TestEntrySetFirstTimeSpreadKeepsTTL(t *testing.T) {
 	assert.Equal(t, entryTestTimeouts.TTL, ttl, "incorrect TTL")
 	assert.Equal(t, test_utils.StringPointer("value1"), e.value.Load(), "incorrect value")
 	assert.False(t, e.accessed.Load(), "incorrect accessed")
+}
+
+// TTL which would end before the spread first reload is extended to it, so the
+// entry is not evicted before the reload
+func TestEntrySetFirstTimeSpreadExtendsTTL(t *testing.T) {
+	var nowMillis int64 = 1700000000
+	// TTL 3s +/- 50%, the spread reload in [1.5s, 6s)
+	timeouts := entryTestTimeouts
+	timeouts.TTL = 3 * time.Second
+	timeouts.Randomizer = 0.5
+
+	tries := 10000
+
+	beforeReload := 0
+	outOfRange := 0
+	extended := 0
+
+	for i := 0; i < tries; i++ {
+		e := newCachedEntry[int, string](0)
+		ttl := e.set(test_utils.StringPointer("value1"), nil, nowMillis, &timeouts, true)
+
+		reloadIn := time.Duration(e.nextReload.Load()-nowMillis) * time.Millisecond
+		if ttl < reloadIn {
+			beforeReload++
+		}
+		if ttl < 1500*time.Millisecond || ttl > max(4500*time.Millisecond, reloadIn+time.Millisecond) {
+			outOfRange++
+		}
+		if ttl > 4500*time.Millisecond {
+			extended++
+		}
+	}
+
+	t.Logf("TTL extended beyond TTL + 50%%: %d", extended)
+
+	assert.Zero(t, beforeReload, "TTL ends before the spread reload")
+	assert.Zero(t, outOfRange, "TTL out of [TTL - 50%, max(TTL + 50%, spread reload)]")
+	assert.Positive(t, extended, "no TTL extended beyond TTL + 50%")
 }
 
 // Only the first reload is spread, reloads after it are planned after

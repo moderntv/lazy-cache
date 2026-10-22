@@ -14,7 +14,10 @@ type Timeouts struct {
 	// If reload fails or entry data was not accessed, the TTL stays the same.
 	// The TTL duration is being randomized by `Randomizer`.
 	// TTL value should be at least twice bigger than `ReloadInterval` for
-	// optimal cache self-maintenance.
+	// optimal cache self-maintenance. With automatic reload, accessed entries
+	// can expire before their reload unless (1 - `Randomizer`) * `TTL` is at
+	// least 0.9 * (1 + `Randomizer`) * `ReloadInterval` (`New` logs a warning
+	// otherwise), e.g. `TTL` >= 2.7 * `ReloadInterval` for `Randomizer` 0.5.
 	TTL time.Duration `mapstructure:"ttl"`
 
 	// TTL for entry which was not found in data storage (e.g. SQL database)
@@ -35,7 +38,10 @@ type Timeouts struct {
 	// ReloadInterval specifies how often the entry should be reloaded or how
 	// long its data are valid in cache.
 	// The duration is being randomized by `Randomizer`. The first reload of
-	// the entry is spread (see `DisableSpreadInitialReload`).
+	// the entry is spread, so data of the first load can be kept up to
+	// (1 + 2 * `Randomizer`) * `ReloadInterval` (see
+	// `DisableSpreadInitialReload`).
+	// With automatic reload, entries are reloaded at 0.9 of the planned time.
 	// When entry is being invalidated (by `Invalidate` function call),
 	// immediate reload is triggered (in background) only when entry was
 	// accessed (via `Get` function) since last reload. If entry was not
@@ -47,18 +53,24 @@ type Timeouts struct {
 	// DisableSpreadInitialReload disables spreading of the first reloads.
 	// By default, the first reload after the first successful load of an
 	// entry (preloading, `Get` of an entry missing in cache, `GetMultiple`)
-	// is planned at a random time from
-	// [`Randomizer` * `ReloadInterval`, (1 + `Randomizer`) * `ReloadInterval`).
-	// Entries loaded at once (e.g. by preloading) are thus reloaded evenly
-	// from the start instead of all of them waiting the whole
-	// `ReloadInterval` and then being reloaded in a wave. The window is as
-	// wide as `ReloadInterval` (narrower window would leave a gap repeating
-	// in every following reload interval) and it is shifted, so just loaded
-	// data are not reloaded right away.
+	// is planned after `Randomizer` * `ReloadInterval` plus the random time
+	// to the next reload of an entry kept in cache for a long time.
+	// Entries loaded at once (e.g. by preloading) are thus not reloaded for
+	// `Randomizer` * `ReloadInterval` (0.9 of it with automatic reload), so
+	// just loaded data are not reloaded right away, and then at a constant
+	// rate, the same as in a long running cache, instead of in waves (e.g.
+	// all of them waiting the whole `ReloadInterval` and then being reloaded
+	// at once).
+	// The first reload is planned uniformly up to `ReloadInterval`, the
+	// remaining `Randomizer` part of entries less and less likely up to
+	// (1 + 2 * `Randomizer`) * `ReloadInterval`, which is
+	// `Randomizer` * `ReloadInterval` later than the latest reload without
+	// spreading.
 	// All following reloads are planned after `ReloadInterval` randomized by
 	// `Randomizer`, so the average reload interval is not shortened.
-	// TTL is not affected and first loads which fail or end with NotFound
-	// are not spread.
+	// TTL which would end before the spread first reload is extended to it,
+	// so the entry is not evicted before being reloaded. First loads which
+	// fail or end with NotFound are not spread.
 	// Data of the first load are valid (e.g. for `GetCached`) only until
 	// the spread reload time, which can be as soon as
 	// `Randomizer` * `ReloadInterval` (or right away with zero `Randomizer`).

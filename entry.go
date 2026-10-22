@@ -86,12 +86,15 @@ end:
 
 	var reloadIn time.Duration
 	if init && err == nil && !timeouts.DisableSpreadInitialReload {
-		// spread first reloads of entries loaded at once (e.g. preloaded)
-		// evenly over a window as wide as ReloadInterval, so they are not
-		// reloaded all together; the window is shifted by Randomizer part of
-		// ReloadInterval, so just loaded data are not reloaded right away
-		minReloadIn := time.Duration(float64(timeouts.ReloadInterval) * timeouts.Randomizer)
-		reloadIn = minReloadIn + utils.RandomDurationUpTo(timeouts.ReloadInterval)
+		// entries loaded at once (e.g. preloaded) are not reloaded for
+		// Randomizer part of ReloadInterval, so just loaded data are not
+		// reloaded right away, and then at the constant rate of entries
+		// reloaded for a long time instead of in waves
+		gap := time.Duration(float64(timeouts.ReloadInterval) * timeouts.Randomizer)
+		reloadIn = gap + utils.RandomResidualDuration(timeouts.ReloadInterval, timeouts.Randomizer)
+		// the spread reload can come later than any following one, the entry
+		// must not expire before it
+		ttl = max(ttl, reloadIn)
 	} else {
 		reloadIn = utils.RandomizeDuration(timeouts.ReloadInterval, timeouts.Randomizer)
 	}
